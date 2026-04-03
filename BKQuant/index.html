@@ -7,76 +7,53 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-
-    <main class="shell">
-      <section class="brand">
-        <div class="brand-top-row">
-          <div class="logo3d" aria-hidden="true">
-            <div class="logo-mark-3d" title="BKQuant — DNA helix mark">
-              <svg class="logo-dna" viewBox="0 0 80 80" role="img" aria-label="Double helix DNA">
-                <defs>
-                  <linearGradient id="dnaStrandA" x1="0%" y1="100%" x2="100%" y2="0%">
-                    <stop offset="0%" stop-color="#0f766e"/>
-                    <stop offset="100%" stop-color="#2dd4bf"/>
-                  </linearGradient>
-                  <linearGradient id="dnaStrandB" x1="100%" y1="100%" x2="0%" y2="0%">
-                    <stop offset="0%" stop-color="#1d4ed8"/>
-                    <stop offset="100%" stop-color="#38bdf8"/>
-                  </linearGradient>
-                  <linearGradient id="dnaFace" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#f8fafc"/>
-                    <stop offset="100%" stop-color="#e2e8f0"/>
-                  </linearGradient>
-                  <filter id="dnaSh" x="-15%" y="-15%" width="130%" height="130%">
-                    <feDropShadow dx="0" dy="3" stdDeviation="2.5" flood-color="#0f172a" flood-opacity="0.18"/>
-                  </filter>
-                </defs>
-                <rect x="2" y="2" width="76" height="76" rx="20" fill="url(#dnaFace)" stroke="#cbd5e1" stroke-width="1.2"/>
-                <!-- Double helix: opposing backbones + base pairs (3D depth via overlap & shadow) -->
-                <path
-                  d="M 26 70 C 24 54 28 38 26 22 C 25 14 26 10 28 8"
-                  stroke="url(#dnaStrandA)"
-                  stroke-width="5"
-                  fill="none"
-                  stroke-linecap="round"
-                  filter="url(#dnaSh)"
-                />
-                <path
-                  d="M 54 70 C 56 54 52 38 54 22 C 55 14 54 10 52 8"
-                  stroke="url(#dnaStrandB)"
-                  stroke-width="5"
-                  fill="none"
-                  stroke-linecap="round"
-                  filter="url(#dnaSh)"
-                />
-                <g stroke="#64748b" stroke-width="2.2" stroke-linecap="round" opacity="0.9">
-                  <line x1="27" y1="62" x2="53" y2="60"/>
-                  <line x1="25" y1="50" x2="55" y2="50"/>
-                  <line x1="27" y1="38" x2="53" y2="38"/>
-                  <line x1="29" y1="26" x2="51" y2="28"/>
-                  <line x1="31" y1="16" x2="49" y2="14"/>
-                </g>
-                <ellipse cx="40" cy="72" rx="14" ry="4" fill="#0f172a" opacity="0.06"/>
-              </svg>
-            </div>
-            <span class="logo-text">BKQuant</span>
+    <header class="site-header">
+      <div class="site-header-inner">
+        <div class="site-header-brand" aria-hidden="true">
+          <div class="site-header-logo">
+            <svg class="logo-dna logo-dna--header" viewBox="0 0 80 80" role="img" aria-hidden="true">
+              <defs>
+                <linearGradient id="hdrStrandA" x1="0%" y1="100%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#a7f3d0"/>
+                  <stop offset="100%" stop-color="#6ee7b7"/>
+                </linearGradient>
+                <linearGradient id="hdrStrandB" x1="100%" y1="100%" x2="0%" y2="0%">
+                  <stop offset="0%" stop-color="#93c5fd"/>
+                  <stop offset="100%" stop-color="#bae6fd"/>
+                </linearGradient>
+              </defs>
+              <rect x="2" y="2" width="76" height="76" rx="18" fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+              <path d="M 26 70 C 24 54 28 38 26 22 C 25 14 26 10 28 8" stroke="url(#hdrStrandA)" stroke-width="5" fill="none" stroke-linecap="round"/>
+              <path d="M 54 70 C 56 54 52 38 54 22 C 55 14 54 10 52 8" stroke="url(#hdrStrandB)" stroke-width="5" fill="none" stroke-linecap="round"/>
+              <g stroke="rgba(255,255,255,0.55)" stroke-width="2" stroke-linecap="round">
+                <line x1="27" y1="62" x2="53" y2="60"/>
+                <line x1="25" y1="50" x2="55" y2="50"/>
+                <line x1="27" y1="38" x2="53" y2="38"/>
+              </g>
+            </svg>
+          </div>
+          <div class="site-header-titles">
+            <span class="site-header-title">BKQuant</span>
+            <span class="site-header-sub">Agriculture &amp; plant-breeding analytics</span>
           </div>
         </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="card card--brand">
         <p class="brand-quote">
-          "Dreams and seeds share one law: measure, learn, and improve."
-        </p>
-        <p class="brand-quote sub">
-          Ramanujan meets Rosalind Franklin: precision for every trait.
+          “Dreams and seeds share one law: measure, learn, and improve.”
         </p>
         <p class="help-tag">
-          Ask <b>BKQuant Professor</b> for the understanding the concepts.
+          Ask <b>BKQuant Professor</b> to explore statistical concepts used in these tools.
         </p>
       </section>
 
       <section class="card" id="loginCard">
         <h2>Researcher Login</h2>
         <p class="muted">
-          Enter your credentials to access BKQuant agriculture & plant-breeding analytics.
+          Enter your credentials to access BKQuant agriculture &amp; plant-breeding analytics.
         </p>
 
         <form id="loginForm" autocomplete="off">
@@ -128,7 +105,49 @@
       </section>
     </main>
 
+    <footer class="site-footer">
+      <div class="site-footer-inner">
+        <p class="footer-lead">
+          BKQuant is inspired by two traditions: the search for structure in data through mathematics, and the patient work of observing life at the scale where heredity becomes visible.
+        </p>
+        <div class="heritage-grid">
+          <article class="heritage-card">
+            <img
+              class="heritage-photo"
+              src="https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Srinivasa_Ramanujan_-_OPC_-_1.jpg/240px-Srinivasa_Ramanujan_-_OPC_-_1.jpg"
+              alt="Portrait of Srinivasa Ramanujan"
+              width="160"
+              height="200"
+              loading="lazy"
+              decoding="async"
+            />
+            <h3 class="heritage-name">Srinivasa Ramanujan</h3>
+            <p class="heritage-text">
+              Ramanujan (1887–1920) found extraordinary patterns in numbers and sought truth in formulas with a clarity that still guides how we build and check quantitative models.
+            </p>
+          </article>
+          <article class="heritage-card">
+            <img
+              class="heritage-photo"
+              src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Rosalind_Franklin_%28cropped%29.jpg/240px-Rosalind_Franklin_%28cropped%29.jpg"
+              alt="Portrait of Rosalind Franklin"
+              width="160"
+              height="200"
+              loading="lazy"
+              decoding="async"
+            />
+            <h3 class="heritage-name">Rosalind Franklin</h3>
+            <p class="heritage-text">
+              Franklin (1920–1958) combined experimental rigor with interpretation of molecular images; her work on DNA reminds us that sound measurement—not speculation—is the foundation of biological understanding.
+            </p>
+          </article>
+        </div>
+        <p class="footer-note muted small">
+          Portraits courtesy of Wikimedia Commons (public domain or licensed for reuse). BKQuant is an educational tool; it is not affiliated with any estate or institution.
+        </p>
+      </div>
+    </footer>
+
     <script src="app.js"></script>
   </body>
 </html>
-

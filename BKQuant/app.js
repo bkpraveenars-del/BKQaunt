@@ -8330,12 +8330,20 @@
     fab.style.gap = "6px";
     fab.style.padding = "12px 14px";
     fab.style.borderRadius = "999px";
-    fab.style.border = "1px solid #c5cdd8";
-    fab.style.background = "#fff";
-    fab.style.backdropFilter = "none";
-    fab.style.color = "#0f172a";
-    fab.style.boxShadow = "0 4px 20px rgba(15, 23, 42, 0.12)";
+    fab.style.border = "1px solid #064e3b";
+    fab.style.background = "#064e3b";
+    fab.style.color = "#f8fafc";
+    fab.style.boxShadow = "0 4px 18px rgba(6, 78, 59, 0.28)";
     fab.style.cursor = "pointer";
+    fab.style.transition = "background 0.2s ease, box-shadow 0.2s ease";
+    fab.addEventListener("mouseenter", () => {
+      fab.style.background = "#059669";
+      fab.style.boxShadow = "0 6px 22px rgba(5, 150, 105, 0.4)";
+    });
+    fab.addEventListener("mouseleave", () => {
+      fab.style.background = "#064e3b";
+      fab.style.boxShadow = "0 4px 18px rgba(6, 78, 59, 0.28)";
+    });
     fab.addEventListener("click", showProfessorModal);
     document.body.appendChild(fab);
   }
