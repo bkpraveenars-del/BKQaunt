@@ -11,6 +11,7 @@
 
   const STORAGE_KEY = "bkq_authed_v1";
   const PREV_KEY_PREFIX = "bkq_prev_module_v1:";
+  const META_KEY = "bkq_report_meta_v1";
 
   const qs = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -34,9 +35,20 @@
     }
   }
 
+  function loadReportMeta() {
+    try {
+      const raw = localStorage.getItem(META_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
   function exportHtmlAsDocOrXls({ title, tablesSelector = "table.data", interpretSelector = ".export-interpretation", filename, asExcel }) {
     const tables = $$(tablesSelector);
     const interpretation = document.querySelector(interpretSelector)?.innerText || "";
+    const meta = loadReportMeta() || {};
 
     const charts = $$("#contentBody canvas");
     const chartImgs = charts
@@ -50,6 +62,43 @@
     const tableHtml = tables
       .map((t) => t.outerHTML)
       .join("\n");
+
+    const metaRows = [
+      ["Website", "BKQuant"],
+      ["Analysis", title],
+      ["Researcher", meta.researcher || ""],
+      ["Institution", meta.institution || ""],
+      ["Crop", meta.crop || ""],
+      ["Trait(s)", meta.traits || ""],
+      ["Season/Year", meta.season || ""],
+      ["Location", meta.location || ""],
+      ["Date", meta.date || new Date().toISOString().slice(0, 10)],
+    ].filter((r) => String(r[1] || "").trim().length > 0);
+
+    const metaTable =
+      metaRows.length
+        ? `<table style="width:100%;border-collapse:collapse;margin:10px 0 14px">
+            <tbody>
+              ${metaRows
+                .map(
+                  ([k, v]) =>
+                    `<tr>
+                      <td style="border:1px solid #aaa;padding:6px;text-align:left;font-weight:700;background:#f7f7f7">${qs(k)}</td>
+                      <td style="border:1px solid #aaa;padding:6px;text-align:left">${qs(String(v))}</td>
+                    </tr>`
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : "";
+
+    const quotation = `
+      <div style="margin-top:14px;border-top:1px solid #ccc;padding-top:10px">
+        <div style="font-weight:700">BKQuant quotation (for researchers)</div>
+        <div style="margin-top:6px">“An equation for me has no meaning unless it expresses a thought of God.” — Srinivasa Ramanujan</div>
+        <div style="margin-top:6px">“Science and everyday life cannot and should not be separated.” — Rosalind Franklin</div>
+      </div>
+    `;
 
     // Word/Excel can open HTML with the right MIME type.
     const styles = asExcel
@@ -65,10 +114,12 @@
 </head>
 <body>
   <h1>${qs(title)}</h1>
+  ${metaTable}
   <div>${chartImgs}</div>
   ${tableHtml}
   <h2>Interpretation</h2>
   <p style="white-space:pre-wrap">${qs(interpretation)}</p>
+  ${quotation}
 </body>
 </html>`;
 
@@ -630,6 +681,94 @@
     modal.classList.add("open");
   }
 
+  function saveReportMeta(meta) {
+    try {
+      localStorage.setItem(META_KEY, JSON.stringify(meta));
+    } catch {
+      // ignore
+    }
+  }
+
+  function showReportMetaModal() {
+    const existing = document.getElementById("metaModal");
+    if (existing) {
+      existing.classList.add("open");
+      return;
+    }
+
+    const current = loadReportMeta() || {};
+    const modal = document.createElement("div");
+    modal.id = "metaModal";
+    modal.innerHTML = `
+      <style>
+        #metaModal{position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:rgba(0,0,0,0.55);padding:18px;opacity:0;pointer-events:none;transition:opacity .15s ease}
+        #metaModal.open{opacity:1;pointer-events:auto}
+        #metaModal .box{width:min(860px,100%);background:rgba(10,14,30,0.92);border:1px solid rgba(255,255,255,0.14);border-radius:18px;box-shadow:0 28px 90px rgba(0,0,0,0.65);padding:16px}
+        #metaModal header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
+        #metaModal h3{margin:0;font-size:18px}
+        #metaModal .close{appearance:none;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#eaf1ff;border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:850}
+        #metaModal .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+        #metaModal label{display:grid;gap:6px;font-weight:700;font-size:12.5px;color:rgba(234,241,255,0.92)}
+        #metaModal input{width:100%;padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,0.16);background:rgba(0,0,0,0.18);color:#eaf1ff}
+        #metaModal .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+        @media (max-width:900px){#metaModal .grid{grid-template-columns:1fr}}
+      </style>
+      <div class="box" role="dialog" aria-modal="true" aria-label="Report metadata">
+        <header>
+          <div>
+            <h3>Report metadata (included in DOC/XLS downloads)</h3>
+            <div class="muted small" style="margin-top:4px">Saved locally on this computer (offline). You can update anytime.</div>
+          </div>
+          <button class="close" type="button">Close</button>
+        </header>
+        <div class="grid">
+          <label>Researcher<input id="mResearcher" value="${qs(current.researcher || "")}" placeholder="e.g., Dr. BK Praveen"/></label>
+          <label>Institution<input id="mInstitution" value="${qs(current.institution || "")}" placeholder="e.g., Plant Breeding Lab"/></label>
+          <label>Crop<input id="mCrop" value="${qs(current.crop || "")}" placeholder="e.g., Rice"/></label>
+          <label>Trait(s)<input id="mTraits" value="${qs(current.traits || "")}" placeholder="e.g., Yield, Plant height"/></label>
+          <label>Season/Year<input id="mSeason" value="${qs(current.season || "")}" placeholder="e.g., Kharif 2026"/></label>
+          <label>Location<input id="mLocation" value="${qs(current.location || "")}" placeholder="e.g., Farm-1, Block-A"/></label>
+          <label>Date<input id="mDate" value="${qs(current.date || new Date().toISOString().slice(0,10))}" placeholder="YYYY-MM-DD"/></label>
+        </div>
+        <div class="actions">
+          <button class="action-btn primary2" type="button" id="mSave">Save metadata</button>
+          <button class="action-btn" type="button" id="mClear">Clear</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    const close = modal.querySelector(".close");
+    close.addEventListener("click", () => modal.classList.remove("open"));
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) modal.classList.remove("open");
+    });
+
+    modal.querySelector("#mSave").addEventListener("click", () => {
+      const meta = {
+        researcher: modal.querySelector("#mResearcher").value.trim(),
+        institution: modal.querySelector("#mInstitution").value.trim(),
+        crop: modal.querySelector("#mCrop").value.trim(),
+        traits: modal.querySelector("#mTraits").value.trim(),
+        season: modal.querySelector("#mSeason").value.trim(),
+        location: modal.querySelector("#mLocation").value.trim(),
+        date: modal.querySelector("#mDate").value.trim(),
+      };
+      saveReportMeta(meta);
+      modal.classList.remove("open");
+    });
+
+    modal.querySelector("#mClear").addEventListener("click", () => {
+      saveReportMeta({});
+      ["#mResearcher","#mInstitution","#mCrop","#mTraits","#mSeason","#mLocation"].forEach((id) => {
+        const el = modal.querySelector(id);
+        if (el) el.value = "";
+      });
+    });
+
+    modal.classList.add("open");
+  }
+
   function storePrev(moduleId, payload) {
     try {
       localStorage.setItem(PREV_KEY_PREFIX + moduleId, JSON.stringify(payload));
@@ -1107,6 +1246,979 @@
         { fTreat: out.fTreat, msError: out.msError, ssTreat: out.ssTreat, ssBlock: out.ssBlock }
       );
     });
+  }
+
+  // --- Factorial RBD (A×B in blocks) ---
+  function renderFactorial() {
+    const title = "Factorial RBD (Two-way A×B) - ANOVA";
+    showContentHeader({
+      title,
+      subtitle: "Input Factor A × Factor B across blocks → ANOVA for A, B, A×B, block effects, means and plots.",
+    });
+
+    const defaultA = 2;
+    const defaultB = 2;
+    const defaultR = 3;
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Design type</div><div class="value">RBD with factorial treatment structure</div></div>
+        <div class="kpi"><div class="label">Factors</div><div class="value">Factor A (a levels), Factor B (b levels)</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">A, B, A×B, Blocks ANOVA</div></div>
+      </div>
+
+      <div style="height:12px"></div>
+
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Input grid</h4>
+            <div class="muted small" style="margin-bottom:8px">
+              Enter values by treatment combination (A level × B level) and block (R1..R<small>r</small>).
+            </div>
+            <div class="input-grid" id="factControls">
+              <div class="two-col">
+                <label>
+                  Levels of Factor A (a)
+                  <input type="number" min="2" id="factA" value="${defaultA}" />
+                </label>
+                <label>
+                  Levels of Factor B (b)
+                  <input type="number" min="2" id="factB" value="${defaultB}" />
+                </label>
+              </div>
+              <label>
+                Blocks / Replications (r)
+                <input type="number" min="2" id="factR" value="${defaultR}" />
+              </label>
+              <button class="action-btn primary2" type="button" id="factBuild">Build grid</button>
+              <div class="note" style="margin:0">
+                Layout: each row is a treatment combination (A<sub>i</sub>B<sub>j</sub>), columns are blocks (R1..Rr).
+              </div>
+            </div>
+            <div id="factGridWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="factCompute">Compute factorial RBD</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="factResultTop"></div>
+            <div class="chart" style="height:260px;margin-top:12px">
+              <canvas id="factBar" style="width:100%;height:100%"></canvas>
+            </div>
+            <div id="factTableWrap" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "factorial",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["fA", "fB", "fAB"],
+    });
+
+    function buildGrid(a, b, r) {
+      const wrap = $("#factGridWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+
+      const headers = ["Combination / Block"];
+      for (let k = 0; k < r; k++) headers.push(`R${k + 1}`);
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+
+      const tbodyRows = [];
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          const comb = `A${i + 1}B${j + 1}`;
+          const cells = [];
+          for (let k = 0; k < r; k++) {
+            const base = (i + 1) * 10 + (j + 1) * 4;
+            const blockEff = (k + 1) * (k === 0 ? -0.5 : k === 1 ? 0.2 : 1.0);
+            const noise = (i * 0.7 + j * 0.4 + k * 0.3);
+            const val = base + blockEff + noise;
+            cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-cell="a${i}b${j}r${k}" /></td>`);
+          }
+          tbodyRows.push(`<tr><th>${qs(comb)}</th>${cells.join("")}</tr>`);
+        }
+      }
+
+      table.insertAdjacentHTML("beforeend", `<tbody>${tbodyRows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    buildGrid(defaultA, defaultB, defaultR);
+
+    $("#factBuild").addEventListener("click", () => {
+      const a = Math.max(2, Number($("#factA").value || defaultA));
+      const b = Math.max(2, Number($("#factB").value || defaultB));
+      const r = Math.max(2, Number($("#factR").value || defaultR));
+      buildGrid(a, b, r);
+    });
+
+    $("#factCompute").addEventListener("click", () => {
+      const a = Math.max(2, Number($("#factA").value || defaultA));
+      const b = Math.max(2, Number($("#factB").value || defaultB));
+      const r = Math.max(2, Number($("#factR").value || defaultR));
+
+      // Collect data: y[i][j][k]
+      const y = [];
+      for (let i = 0; i < a; i++) {
+        y[i] = [];
+        for (let j = 0; j < b; j++) {
+          y[i][j] = [];
+          for (let k = 0; k < r; k++) {
+            const input = document.querySelector(`#factGridWrap input[data-cell="a${i}b${j}r${k}"]`);
+            const v = Number(input?.value ?? NaN);
+            y[i][j][k] = Number.isFinite(v) ? v : 0;
+          }
+        }
+      }
+
+      const N = a * b * r;
+      let sumY2 = 0;
+      let grandTotal = 0;
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          for (let k = 0; k < r; k++) {
+            const v = y[i][j][k];
+            sumY2 += v * v;
+            grandTotal += v;
+          }
+        }
+      }
+      const CF = (grandTotal * grandTotal) / N;
+      const ssTotal = sumY2 - CF;
+
+      // Totals by combination (i,j), by A, by B, and by block (replication)
+      const T_ij = [];
+      const A_totals = Array(a).fill(0);
+      const B_totals = Array(b).fill(0);
+      const Block_totals = Array(r).fill(0);
+
+      for (let i = 0; i < a; i++) {
+        T_ij[i] = [];
+        for (let j = 0; j < b; j++) {
+          let combTot = 0;
+          for (let k = 0; k < r; k++) {
+            const v = y[i][j][k];
+            combTot += v;
+            Block_totals[k] += v;
+          }
+          T_ij[i][j] = combTot;
+          A_totals[i] += combTot;
+          B_totals[j] += combTot;
+        }
+      }
+
+      // Treatment SS (all A×B combinations)
+      let ssTreat = 0;
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          ssTreat += (T_ij[i][j] * T_ij[i][j]) / r;
+        }
+      }
+      ssTreat -= CF;
+
+      // Blocks (replications)
+      let ssBlock = 0;
+      for (let k = 0; k < r; k++) ssBlock += (Block_totals[k] * Block_totals[k]) / (a * b);
+      ssBlock -= CF;
+
+      // Factor A and Factor B
+      let ssA = 0;
+      for (let i = 0; i < a; i++) ssA += (A_totals[i] * A_totals[i]) / (b * r);
+      ssA -= CF;
+      let ssB = 0;
+      for (let j = 0; j < b; j++) ssB += (B_totals[j] * B_totals[j]) / (a * r);
+      ssB -= CF;
+
+      const ssAB = ssTreat - ssA - ssB;
+      const ssError = ssTotal - ssTreat - ssBlock;
+
+      const dfA = a - 1;
+      const dfB = b - 1;
+      const dfAB = (a - 1) * (b - 1);
+      const dfBlock = r - 1;
+      const dfError = (a * b - 1) * (r - 1);
+      const dfTotal = N - 1;
+
+      const msA = ssA / dfA;
+      const msB = ssB / dfB;
+      const msAB = ssAB / dfAB;
+      const msBlock = ssBlock / dfBlock;
+      const msError = ssError / dfError;
+
+      const fA = msError === 0 ? 0 : msA / msError;
+      const fB = msError === 0 ? 0 : msB / msError;
+      const fAB = msError === 0 ? 0 : msAB / msError;
+
+      const sigA = approxFSignificance(fA, dfA, dfError);
+      const sigB = approxFSignificance(fB, dfB, dfError);
+      const sigAB = approxFSignificance(fAB, dfAB, dfError);
+
+      // Means for each combination
+      const comboMeans = [];
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          const meanComb = T_ij[i][j] / r;
+          comboMeans.push({ label: `A${i + 1}B${j + 1}`, mean: meanComb });
+        }
+      }
+
+      $("#factResultTop").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F (A)</div><div class="value">${fA.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F (B)</div><div class="value">${fB.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F (A×B)</div><div class="value">${fAB.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">MS Error</div><div class="value">${msError.toFixed(4)}</div></div>
+        </div>
+      `;
+
+      const labels = comboMeans.map((m) => m.label);
+      const values = comboMeans.map((m) => m.mean);
+      drawBarChart($("#factBar"), labels, values, { title: "Combination means (A×B over blocks)" });
+
+      const headers = ["Source", "SS", "df", "MS", "F", "Approx. Sig."];
+      const rows = [
+        ["Factor A", ssA, dfA, msA, fA, sigA.level],
+        ["Factor B", ssB, dfB, msB, fB, sigB.level],
+        ["A×B", ssAB, dfAB, msAB, fAB, sigAB.level],
+        ["Blocks", ssBlock, dfBlock, msBlock, msBlock / msError || "", ""],
+        ["Error", ssError, dfError, msError, "", ""],
+        ["Total", ssTotal, dfTotal, "", "", ""],
+      ];
+      $("#factTableWrap").innerHTML = buildTable(headers, rows);
+
+      const deviationHtml = deviationBanner(
+        "factorial",
+        { fA, fB, fAB },
+        ["fA", "fB", "fAB"]
+      );
+
+      const best = [...comboMeans].sort((a, b) => b.mean - a.mean)[0];
+      const interpretation =
+        `Factorial ANOVA in RBD partitions variability into main effects (A, B), interaction (A×B), blocks, and error.\n` +
+        `Computed F-values:\n` +
+        `• F(A) = ${fA.toFixed(4)} (${sigA.note})\n` +
+        `• F(B) = ${fB.toFixed(4)} (${sigB.note})\n` +
+        `• F(A×B) = ${fAB.toFixed(4)} (${sigAB.note})\n\n` +
+        `If A×B is significant, the ranking of A or B levels changes across the other factor (cross-over interaction).\n` +
+        `In your data, the highest mean combination is ${best.label} (mean=${best.mean.toFixed(3)}).\n\n` +
+        `BKQuant note: significance uses approximate thresholds for offline use. For formal reports, consult official F tables or full statistical software.`;
+
+      setInterpretation(
+        "factorial",
+        interpretation,
+        deviationHtml ? deviationHtml : "",
+        { fA, fB, fAB, msError }
+      );
+    });
+  }
+
+  // --- Latin Square (often requested as "Lattice/Latin square") ---
+  function renderLatinSquare() {
+    const title = "Latin Square Design - ANOVA";
+    showContentHeader({
+      title,
+      subtitle: "Latin square (t×t) controls two nuisance sources (rows & columns). Input grid → ANOVA + treatment means plot.",
+    });
+
+    const defaultT = 4; // 4×4
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Design type</div><div class="value">Latin Square</div></div>
+        <div class="kpi"><div class="label">Controls</div><div class="value">Row + Column variation</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA + treatment means</div></div>
+      </div>
+
+      <div style="height:12px"></div>
+
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Grid</h4>
+            <div class="muted small" style="margin-bottom:8px">
+              Each cell has one treatment (fixed Latin square layout) and one response value.
+            </div>
+            <div class="input-grid" id="lsControls">
+              <label>
+                Treatments / square size (t)
+                <input type="number" min="3" max="10" id="lsT" value="${defaultT}" />
+              </label>
+              <button class="action-btn primary2" type="button" id="lsBuild">Build square</button>
+              <div class="note" style="margin:0">
+                Note: In Latin square, each treatment appears exactly once per row and once per column.
+              </div>
+            </div>
+            <div id="lsGridWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="lsCompute">Compute Latin Square</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="lsResultTop"></div>
+            <div class="chart" style="height:260px;margin-top:12px">
+              <canvas id="lsBar" style="width:100%;height:100%"></canvas>
+            </div>
+            <div id="lsTableWrap" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "lattice",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["fTreat"],
+    });
+
+    function latinLayout(t) {
+      // simple cyclic latin square: treatment index = (row + col) mod t
+      const layout = [];
+      for (let i = 0; i < t; i++) {
+        layout[i] = [];
+        for (let j = 0; j < t; j++) layout[i][j] = (i + j) % t;
+      }
+      return layout;
+    }
+
+    function trtLabel(idx) {
+      // T1..Tt (keeps consistent with other modules)
+      return `T${idx + 1}`;
+    }
+
+    function buildSquare(t) {
+      const wrap = $("#lsGridWrap");
+      wrap.innerHTML = "";
+      const layout = latinLayout(t);
+
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Row/Col"];
+      for (let j = 0; j < t; j++) headers.push(`C${j + 1}`);
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+
+      const rows = [];
+      for (let i = 0; i < t; i++) {
+        const cells = [];
+        for (let j = 0; j < t; j++) {
+          const trt = layout[i][j];
+          const base = 20 + trt * 2.4;
+          const rowEff = (i - (t - 1) / 2) * 0.6;
+          const colEff = (j - (t - 1) / 2) * 0.4;
+          const val = base + rowEff + colEff + ((i + j) % 2 ? 0.3 : -0.2);
+          cells.push(
+            `<td>
+              <div class="muted small" style="font-weight:900;margin-bottom:4px">${qs(trtLabel(trt))}</div>
+              <input type="number" step="0.01" value="${val.toFixed(2)}" data-cell="r${i}c${j}" />
+            </td>`
+          );
+        }
+        rows.push(`<tr><th>${qs(`R${i + 1}`)}</th>${cells.join("")}</tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    buildSquare(defaultT);
+
+    $("#lsBuild").addEventListener("click", () => {
+      const t = Math.max(3, Math.min(10, Number($("#lsT").value || defaultT)));
+      buildSquare(t);
+    });
+
+    $("#lsCompute").addEventListener("click", () => {
+      const t = Math.max(3, Math.min(10, Number($("#lsT").value || defaultT)));
+      const layout = latinLayout(t);
+
+      // collect y, and totals
+      const N = t * t;
+      let sumY2 = 0;
+      let G = 0;
+      const rowTotals = Array(t).fill(0);
+      const colTotals = Array(t).fill(0);
+      const trtTotals = Array(t).fill(0);
+
+      for (let i = 0; i < t; i++) {
+        for (let j = 0; j < t; j++) {
+          const input = document.querySelector(`#lsGridWrap input[data-cell="r${i}c${j}"]`);
+          const v = Number(input?.value ?? NaN);
+          const y = Number.isFinite(v) ? v : 0;
+          sumY2 += y * y;
+          G += y;
+          rowTotals[i] += y;
+          colTotals[j] += y;
+          trtTotals[layout[i][j]] += y;
+        }
+      }
+
+      const CF = (G * G) / N;
+      const ssTotal = sumY2 - CF;
+      const ssRow = rowTotals.reduce((a, r) => a + (r * r) / t, 0) - CF;
+      const ssCol = colTotals.reduce((a, c) => a + (c * c) / t, 0) - CF;
+      const ssTreat = trtTotals.reduce((a, x) => a + (x * x) / t, 0) - CF;
+      const ssError = ssTotal - ssRow - ssCol - ssTreat;
+
+      const dfRow = t - 1;
+      const dfCol = t - 1;
+      const dfTreat = t - 1;
+      const dfError = (t - 1) * (t - 2);
+      const msTreat = ssTreat / dfTreat;
+      const msError = ssError / dfError;
+      const fTreat = msError === 0 ? 0 : msTreat / msError;
+      const sig = approxFSignificance(fTreat, dfTreat, dfError);
+
+      $("#lsResultTop").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F (Treat)</div><div class="value">${fTreat.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">df(Treat), df(Error)</div><div class="value">${dfTreat}, ${dfError}</div></div>
+          <div class="kpi"><div class="label">Approx. significance</div><div class="value">${qs(sig.level)}</div></div>
+          <div class="kpi"><div class="label">MS Error</div><div class="value">${msError.toFixed(4)}</div></div>
+        </div>
+      `;
+
+      const means = trtTotals.map((tot, idx) => ({ trt: trtLabel(idx), mean: tot / t }));
+      drawBarChart($("#lsBar"), means.map((m) => m.trt), means.map((m) => m.mean), { title: "Treatment means (Latin square)" });
+
+      const headers = ["Source", "SS", "df", "MS", "F"];
+      const rows = [
+        ["Rows", ssRow, dfRow, ssRow / dfRow, (ssRow / dfRow) / msError || ""],
+        ["Columns", ssCol, dfCol, ssCol / dfCol, (ssCol / dfCol) / msError || ""],
+        ["Treatments", ssTreat, dfTreat, msTreat, fTreat],
+        ["Error", ssError, dfError, msError, ""],
+        ["Total", ssTotal, N - 1, "", ""],
+      ];
+      $("#lsTableWrap").innerHTML = buildTable(headers, rows);
+
+      const deviationHtml = deviationBanner("lattice", { fTreat }, ["fTreat"]);
+      const best = [...means].sort((a, b) => b.mean - a.mean)[0];
+      const interpretation =
+        `Latin square ANOVA tests treatment differences while controlling two nuisance sources: rows and columns.\n` +
+        `Computed: F(treatments) = ${fTreat.toFixed(4)} with df(T)=${dfTreat}, df(Error)=${dfError}.\n` +
+        `Approx. significance: ${sig.note}.\n\n` +
+        `Highest mean treatment: ${best.trt} (mean=${best.mean.toFixed(3)}).\n\n` +
+        `If row/column effects are large, Latin square often reduces residual error compared to CRD.`;
+
+      setInterpretation("lattice", interpretation, deviationHtml || "", { fTreat, msError });
+    });
+
+    $("#lsCompute").click();
+  }
+
+  // --- Augmented Design (Checks replicated in blocks; new entries unreplicated) ---
+  function renderAugmented() {
+    const title = "Augmented Design - Adjusted Means (Checks + New Entries)";
+    showContentHeader({
+      title,
+      subtitle: "Compute adjusted means for new entries using check-based block adjustment, with exportable tables and plot.",
+    });
+
+    const defaultChecks = 3;
+    const defaultBlocks = 4;
+    const defaultNew = 6;
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Design type</div><div class="value">Augmented (checks replicated)</div></div>
+        <div class="kpi"><div class="label">Purpose</div><div class="value">Many new genotypes with limited replication</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">Adjusted means + check ANOVA</div></div>
+      </div>
+
+      <div style="height:12px"></div>
+
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Inputs</h4>
+            <div class="input-grid" id="augControls">
+              <div class="two-col">
+                <label>
+                  Checks (c)
+                  <input type="number" min="2" id="augC" value="${defaultChecks}" />
+                </label>
+                <label>
+                  Blocks (b)
+                  <input type="number" min="2" id="augB" value="${defaultBlocks}" />
+                </label>
+              </div>
+              <label>
+                New entries (n)
+                <input type="number" min="1" id="augN" value="${defaultNew}" />
+              </label>
+              <button class="action-btn primary2" type="button" id="augBuild">Build inputs</button>
+              <div class="note" style="margin:0">
+                BKQuant adjustment: block effect is estimated from check means in each block.
+              </div>
+            </div>
+            <div id="augInputsWrap" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="augCompute">Compute augmented results</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="augResultTop"></div>
+            <div class="chart" style="height:260px;margin-top:12px">
+              <canvas id="augBar" style="width:100%;height:100%"></canvas>
+            </div>
+            <div id="augTableWrap" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "augmented",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["maxAdjusted"],
+    });
+
+    function buildInputs(c, b, n) {
+      const wrap = $("#augInputsWrap");
+      wrap.innerHTML = "";
+
+      // Checks matrix
+      const checks = document.createElement("div");
+      checks.className = "matrix";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Check/Block"];
+      for (let j = 0; j < b; j++) headers.push(`B${j + 1}`);
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < c; i++) {
+        const cells = [];
+        for (let j = 0; j < b; j++) {
+          const base = 28 + i * 1.8;
+          const blockEff = (j - (b - 1) / 2) * 0.7;
+          const val = base + blockEff + (i === 1 ? 0.6 : 0) + (j % 2 ? 0.2 : -0.1);
+          cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-check="c${i}b${j}" /></td>`);
+        }
+        rows.push(`<tr><th>${qs(`C${i + 1}`)}</th>${cells.join("")}</tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      checks.appendChild(table);
+
+      // New entries list
+      const newBox = document.createElement("div");
+      newBox.className = "matrix";
+      const t2 = document.createElement("table");
+      t2.className = "data";
+      t2.innerHTML = `<thead><tr><th>New entry</th><th>Block</th><th>Observed value</th></tr></thead>`;
+      const newRows = [];
+      for (let i = 0; i < n; i++) {
+        const blk = (i % b) + 1;
+        const val = 30 + i * 0.9 + (blk - (b + 1) / 2) * 0.6 + (i % 2 ? 0.3 : -0.2);
+        newRows.push(
+          `<tr>
+            <th>${qs(`N${i + 1}`)}</th>
+            <td>
+              <select data-newblk="n${i}">
+                ${Array.from({ length: b }, (_, k) => `<option value="${k + 1}" ${k + 1 === blk ? "selected" : ""}>B${k + 1}</option>`).join("")}
+              </select>
+            </td>
+            <td><input type="number" step="0.01" value="${val.toFixed(2)}" data-newval="n${i}" /></td>
+          </tr>`
+        );
+      }
+      t2.insertAdjacentHTML("beforeend", `<tbody>${newRows.join("")}</tbody>`);
+      newBox.appendChild(t2);
+
+      wrap.insertAdjacentHTML("beforeend", `<div class="section" style="margin:0 0 12px"><h4>Checks (replicated)</h4></div>`);
+      wrap.appendChild(checks);
+      wrap.insertAdjacentHTML("beforeend", `<div class="section" style="margin:12px 0 12px"><h4>New entries (unreplicated)</h4></div>`);
+      wrap.appendChild(newBox);
+    }
+
+    buildInputs(defaultChecks, defaultBlocks, defaultNew);
+
+    $("#augBuild").addEventListener("click", () => {
+      const c = Math.max(2, Number($("#augC").value || defaultChecks));
+      const b = Math.max(2, Number($("#augB").value || defaultBlocks));
+      const n = Math.max(1, Number($("#augN").value || defaultNew));
+      buildInputs(c, b, n);
+    });
+
+    $("#augCompute").addEventListener("click", () => {
+      const c = Math.max(2, Number($("#augC").value || defaultChecks));
+      const b = Math.max(2, Number($("#augB").value || defaultBlocks));
+      const n = Math.max(1, Number($("#augN").value || defaultNew));
+
+      // Read checks
+      const checks = [];
+      for (let i = 0; i < c; i++) {
+        checks[i] = [];
+        for (let j = 0; j < b; j++) {
+          const input = document.querySelector(`#augInputsWrap input[data-check="c${i}b${j}"]`);
+          const v = Number(input?.value ?? NaN);
+          checks[i][j] = Number.isFinite(v) ? v : 0;
+        }
+      }
+
+      // Check means per block and overall
+      const blockCheckMeans = [];
+      for (let j = 0; j < b; j++) {
+        let s = 0;
+        for (let i = 0; i < c; i++) s += checks[i][j];
+        blockCheckMeans[j] = s / c;
+      }
+      const grandCheckMean = mean(blockCheckMeans); // mean of block means == overall checks mean
+      const blockEffects = blockCheckMeans.map((m) => m - grandCheckMean);
+
+      // Check ANOVA (RBD on checks only) to estimate error MS
+      const checkOut = rbdAnova(checks, b, c);
+
+      // Read new entries
+      const newEntries = [];
+      for (let i = 0; i < n; i++) {
+        const blk = Number(document.querySelector(`#augInputsWrap select[data-newblk="n${i}"]`)?.value || 1);
+        const val = Number(document.querySelector(`#augInputsWrap input[data-newval="n${i}"]`)?.value ?? NaN);
+        const obs = Number.isFinite(val) ? val : 0;
+        const adj = obs - blockEffects[blk - 1];
+        newEntries.push({ id: `N${i + 1}`, block: `B${blk}`, observed: obs, adjusted: adj });
+      }
+
+      // Include checks (use overall check means) as adjusted for reporting
+      const checkAdj = [];
+      for (let i = 0; i < c; i++) {
+        const row = checks[i];
+        checkAdj.push({ id: `C${i + 1}`, block: "All", observed: mean(row), adjusted: mean(row) }); // mean across blocks
+      }
+
+      const all = [...checkAdj.map((x) => ({ ...x, type: "Check" })), ...newEntries.map((x) => ({ ...x, type: "New" }))];
+      const maxAdjusted = Math.max(...all.map((x) => x.adjusted));
+
+      $("#augResultTop").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+          <div class="kpi"><div class="label">Grand check mean</div><div class="value">${grandCheckMean.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Blocks (b)</div><div class="value">${b}</div></div>
+          <div class="kpi"><div class="label">Check MS Error</div><div class="value">${checkOut.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Max adjusted mean</div><div class="value">${maxAdjusted.toFixed(3)}</div></div>
+        </div>
+      `;
+
+      // Plot adjusted means (top 10)
+      const top = [...all].sort((a, b) => b.adjusted - a.adjusted).slice(0, Math.min(10, all.length));
+      drawBarChart(
+        $("#augBar"),
+        top.map((x) => x.id),
+        top.map((x) => x.adjusted),
+        { title: "Top adjusted means (checks + new)" }
+      );
+
+      const headers1 = ["Genotype", "Type", "Block", "Observed", "Adjusted"];
+      const rows1 = all.map((x) => [x.id, x.type, x.block, x.observed, x.adjusted]);
+      const table1 = buildTable(headers1, rows1);
+
+      const headers2 = ["Block", "Check mean", "Block effect (mean - grand)"];
+      const rows2 = blockCheckMeans.map((m, j) => [`B${j + 1}`, m, blockEffects[j]]);
+      const table2 = buildTable(headers2, rows2);
+
+      const headers3 = ["Checks ANOVA Source", "SS", "df", "MS", "F"];
+      const rows3 = [
+        ["Treatments (checks)", checkOut.ssTreat, checkOut.dfTreat, checkOut.msTreat, checkOut.fTreat],
+        ["Blocks", checkOut.ssBlock, checkOut.dfBlock, checkOut.msBlock, checkOut.msBlock / checkOut.msError || ""],
+        ["Error", checkOut.ssError, checkOut.dfError, checkOut.msError, ""],
+        ["Total", checkOut.ssTotal, checkOut.dfTreat + checkOut.dfBlock + checkOut.dfError, "", ""],
+      ];
+      const table3 = buildTable(headers3, rows3);
+
+      $("#augTableWrap").innerHTML = `${table1}<div style="height:10px"></div>${table2}<div style="height:10px"></div>${table3}`;
+
+      const deviationHtml = deviationBanner("augmented", { maxAdjusted }, ["maxAdjusted"]);
+      const best = [...all].sort((a, b) => b.adjusted - a.adjusted)[0];
+      const interpretation =
+        `Augmented designs use replicated checks to estimate block effects, then adjust unreplicated new entries.\n\n` +
+        `Adjustment used (BKQuant): adjusted = observed − (block check mean − grand check mean).\n` +
+        `This removes systematic block differences estimated from checks.\n\n` +
+        `Top adjusted genotype: ${best.id} (${best.type}) with adjusted mean ${best.adjusted.toFixed(3)}.\n\n` +
+        `If results deviate from previous runs, it usually happens because block assignments or check values changed, altering block effects and adjustments.`;
+
+      setInterpretation("augmented", interpretation, deviationHtml || "", { maxAdjusted, msError: checkOut.msError });
+    });
+
+    $("#augCompute").click();
+  }
+
+  // --- Split Plot Design (R blocks; A main plot; B subplot) ---
+  function renderSplitPlot() {
+    const title = "Split Plot Design - ANOVA";
+    showContentHeader({
+      title,
+      subtitle: "Split-plot in RBD: A tested against Error(A)=Blocks×A; B and A×B tested against Error(B)=residual.",
+    });
+
+    const defaultA = 3;
+    const defaultB = 3;
+    const defaultR = 3;
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Design type</div><div class="value">Split plot (RBD)</div></div>
+        <div class="kpi"><div class="label">Main plot</div><div class="value">Factor A</div></div>
+        <div class="kpi"><div class="label">Sub plot</div><div class="value">Factor B</div></div>
+      </div>
+
+      <div style="height:12px"></div>
+
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Input grid</h4>
+            <div class="input-grid" id="spControls">
+              <div class="two-col">
+                <label>
+                  Levels of A (a)
+                  <input type="number" min="2" id="spA" value="${defaultA}" />
+                </label>
+                <label>
+                  Levels of B (b)
+                  <input type="number" min="2" id="spB" value="${defaultB}" />
+                </label>
+              </div>
+              <label>
+                Blocks/replications (r)
+                <input type="number" min="2" id="spR" value="${defaultR}" />
+              </label>
+              <button class="action-btn primary2" type="button" id="spBuild">Build grid</button>
+              <div class="note" style="margin:0">
+                Each block contains a main-plot layout of A; within each A main plot, B subplots are observed.
+              </div>
+            </div>
+            <div id="spGridWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="spCompute">Compute split-plot</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="spResultTop"></div>
+            <div class="chart" style="height:260px;margin-top:12px">
+              <canvas id="spBar" style="width:100%;height:100%"></canvas>
+            </div>
+            <div id="spTableWrap" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "splitplot",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["fA", "fB", "fAB"],
+    });
+
+    function buildGrid(a, b, r) {
+      const wrap = $("#spGridWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["A×B / Block"];
+      for (let k = 0; k < r; k++) headers.push(`R${k + 1}`);
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+
+      const rows = [];
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          const comb = `A${i + 1}B${j + 1}`;
+          const cells = [];
+          for (let k = 0; k < r; k++) {
+            const mainEff = (i + 1) * 6.5;
+            const subEff = (j + 1) * 2.1;
+            const blockEff = (k - (r - 1) / 2) * 0.9;
+            const inter = (i === 1 && j === 2) ? 2.2 : 0; // small interaction
+            const val = 18 + mainEff + subEff + blockEff + inter + (k % 2 ? 0.2 : -0.15);
+            cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-cell="a${i}b${j}r${k}" /></td>`);
+          }
+          rows.push(`<tr><th>${qs(comb)}</th>${cells.join("")}</tr>`);
+        }
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    buildGrid(defaultA, defaultB, defaultR);
+
+    $("#spBuild").addEventListener("click", () => {
+      const a = Math.max(2, Number($("#spA").value || defaultA));
+      const b = Math.max(2, Number($("#spB").value || defaultB));
+      const r = Math.max(2, Number($("#spR").value || defaultR));
+      buildGrid(a, b, r);
+    });
+
+    $("#spCompute").addEventListener("click", () => {
+      const a = Math.max(2, Number($("#spA").value || defaultA));
+      const b = Math.max(2, Number($("#spB").value || defaultB));
+      const r = Math.max(2, Number($("#spR").value || defaultR));
+
+      // y[i][j][k]
+      const y = [];
+      for (let i = 0; i < a; i++) {
+        y[i] = [];
+        for (let j = 0; j < b; j++) {
+          y[i][j] = [];
+          for (let k = 0; k < r; k++) {
+            const input = document.querySelector(`#spGridWrap input[data-cell="a${i}b${j}r${k}"]`);
+            const v = Number(input?.value ?? NaN);
+            y[i][j][k] = Number.isFinite(v) ? v : 0;
+          }
+        }
+      }
+
+      const N = a * b * r;
+      let sumY2 = 0;
+      let G = 0;
+      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < r; k++) {
+        const v = y[i][j][k];
+        sumY2 += v * v;
+        G += v;
+      }
+      const CF = (G * G) / N;
+      const ssTotal = sumY2 - CF;
+
+      // Totals
+      const blockTotals = Array(r).fill(0); // Bk..
+      const Atotals = Array(a).fill(0); // Ai..
+      const Btotals = Array(b).fill(0); // .Bj.
+      const ABtotals = Array.from({ length: a }, () => Array(b).fill(0)); // ABij.
+      const AblockTotals = Array.from({ length: r }, () => Array(a).fill(0)); // Aik. (sum over B within block for each A)
+
+      for (let k = 0; k < r; k++) {
+        for (let i = 0; i < a; i++) {
+          let aik = 0;
+          for (let j = 0; j < b; j++) {
+            const v = y[i][j][k];
+            blockTotals[k] += v;
+            Atotals[i] += v;
+            Btotals[j] += v;
+            ABtotals[i][j] += v;
+            aik += v;
+          }
+          AblockTotals[k][i] = aik;
+        }
+      }
+
+      // SS blocks
+      let ssBlock = 0;
+      for (let k = 0; k < r; k++) ssBlock += (blockTotals[k] * blockTotals[k]) / (a * b);
+      ssBlock -= CF;
+
+      // SS A
+      let ssA = 0;
+      for (let i = 0; i < a; i++) ssA += (Atotals[i] * Atotals[i]) / (b * r);
+      ssA -= CF;
+
+      // SS Error(A) = blocks×A
+      let ssAblock = 0;
+      for (let k = 0; k < r; k++) for (let i = 0; i < a; i++) ssAblock += (AblockTotals[k][i] * AblockTotals[k][i]) / b;
+      ssAblock = ssAblock - ssBlock - ssA - CF;
+      // Explanation: ssAblock = Σ(Aik^2)/b − Σ(Bk^2)/(ab) − Σ(Ai^2)/(br) + CF
+      // but we computed ssBlock and ssA already as (Σ.. − CF), so subtracting CF again yields correct algebra.
+      // (keeps arithmetic stable and consistent with other modules)
+
+      // SS B
+      let ssB = 0;
+      for (let j = 0; j < b; j++) ssB += (Btotals[j] * Btotals[j]) / (a * r);
+      ssB -= CF;
+
+      // SS AB
+      let ssABall = 0;
+      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) ssABall += (ABtotals[i][j] * ABtotals[i][j]) / r;
+      const ssTreat = ssABall - CF;
+      const ssAB = ssTreat - ssA - ssB;
+
+      // SS Error(B) = residual
+      const ssErrorB = ssTotal - ssBlock - ssA - ssAblock - ssB - ssAB;
+
+      const dfBlock = r - 1;
+      const dfA = a - 1;
+      const dfErrorA = (r - 1) * (a - 1);
+      const dfB = b - 1;
+      const dfAB = (a - 1) * (b - 1);
+      const dfErrorB = a * (r - 1) * (b - 1);
+      const dfTotal = N - 1;
+
+      const msA = ssA / dfA;
+      const msErrorA = ssAblock / dfErrorA;
+      const msB = ssB / dfB;
+      const msAB = ssAB / dfAB;
+      const msErrorB = ssErrorB / dfErrorB;
+
+      const fA = msErrorA === 0 ? 0 : msA / msErrorA;
+      const fB = msErrorB === 0 ? 0 : msB / msErrorB;
+      const fAB = msErrorB === 0 ? 0 : msAB / msErrorB;
+
+      const sigA = approxFSignificance(fA, dfA, dfErrorA);
+      const sigB = approxFSignificance(fB, dfB, dfErrorB);
+      const sigAB = approxFSignificance(fAB, dfAB, dfErrorB);
+
+      $("#spResultTop").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F(A) vs Error(A)</div><div class="value">${fA.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F(B) vs Error(B)</div><div class="value">${fB.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F(A×B) vs Error(B)</div><div class="value">${fAB.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">MS Error(A)</div><div class="value">${msErrorA.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">MS Error(B)</div><div class="value">${msErrorB.toFixed(4)}</div></div>
+        </div>
+      `;
+
+      // Plot AB means
+      const comboMeans = [];
+      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) comboMeans.push({ label: `A${i + 1}B${j + 1}`, mean: ABtotals[i][j] / r });
+      drawBarChart($("#spBar"), comboMeans.map((x) => x.label), comboMeans.map((x) => x.mean), { title: "A×B means (over blocks)" });
+
+      const headers = ["Source", "SS", "df", "MS", "F", "Tested against"];
+      const rows = [
+        ["Blocks", ssBlock, dfBlock, ssBlock / dfBlock, "", ""],
+        ["A (main plot)", ssA, dfA, msA, fA, "Error(A)"],
+        ["Error(A) = Blocks×A", ssAblock, dfErrorA, msErrorA, "", ""],
+        ["B (sub plot)", ssB, dfB, msB, fB, "Error(B)"],
+        ["A×B", ssAB, dfAB, msAB, fAB, "Error(B)"],
+        ["Error(B)", ssErrorB, dfErrorB, msErrorB, "", ""],
+        ["Total", ssTotal, dfTotal, "", "", ""],
+      ];
+      $("#spTableWrap").innerHTML = buildTable(headers, rows);
+
+      const deviationHtml = deviationBanner("splitplot", { fA, fB, fAB }, ["fA", "fB", "fAB"]);
+      const best = [...comboMeans].sort((x, y) => y.mean - x.mean)[0];
+      const interpretation =
+        `Split-plot ANOVA uses two error terms: Error(A) for the main-plot factor A, and Error(B) for subplot factor B and A×B.\n\n` +
+        `Computed (approx significance):\n` +
+        `• A: F=${fA.toFixed(4)} (${sigA.note})\n` +
+        `• B: F=${fB.toFixed(4)} (${sigB.note})\n` +
+        `• A×B: F=${fAB.toFixed(4)} (${sigAB.note})\n\n` +
+        `Best mean combination: ${best.label} (mean=${best.mean.toFixed(3)}).\n\n` +
+        `If A×B is significant, interpret main effects cautiously and select based on specific combinations.`;
+
+      setInterpretation("splitplot", interpretation, deviationHtml || "", { fA, fB, fAB, msErrorA, msErrorB });
+    });
+
+    $("#spCompute").click();
   }
 
   // --- Correlation (Pearson) ---
@@ -1643,150 +2755,16 @@
     // Render
     if (id === "crd") return renderCRD();
     if (id === "rbd") return renderRBD();
+    if (id === "factorial") return renderFactorial();
+    if (id === "lattice") return renderLatinSquare();
+    if (id === "augmented") return renderAugmented();
+    if (id === "splitplot") return renderSplitPlot();
     if (id === "correlation") return renderCorrelation();
     if (id === "regression") return renderRegression();
     if (id === "pca") return renderPCA();
 
     // Everything else: fully worked example output (tables + plots + interpretation).
     switch (id) {
-      case "factorial":
-        return renderEducationalModule({
-          moduleId: "factorial",
-          title: "RBD Factorial (Example: 2×2) - ANOVA",
-          subtitle: "Factor A, Factor B and A×B interaction with example tables/interpretation.",
-          tables: [
-            buildTable(
-              ["Source", "SS", "df", "MS", "F"],
-              [
-                ["Factor A", 128.4, 1, 128.4, 6.94],
-                ["Factor B", 84.9, 1, 84.9, 4.59],
-                ["A×B", 56.2, 1, 56.2, 3.04],
-                ["Error", 147.0, 12, 12.25, ""],
-                ["Total", 516.5, 15, "", ""],
-              ]
-            ),
-            buildTable(
-              ["Treatment Combination", "Mean Response"],
-              [
-                ["A1B1", 22.15],
-                ["A1B2", 25.70],
-                ["A2B1", 28.40],
-                ["A2B2", 33.25],
-              ]
-            ),
-          ],
-          chart: {
-            type: "bar",
-            title: "Example means (A×B)",
-            labels: ["A1B1", "A1B2", "A2B1", "A2B2"],
-            values: [22.15, 25.7, 28.4, 33.25],
-            deviationPayload: { fInteraction: 3.04 },
-          },
-          interpretation:
-            `Factorial ANOVA separates the effects of A, B, and their interaction.\n` +
-            `In the example dataset:\n` +
-            `• A: F=6.94 suggests treatment A differences.\n` +
-            `• B: F=4.59 suggests treatment B differences.\n` +
-            `• A×B: F=3.04 indicates possible interaction.\n\n` +
-            `Interpretation (breeding context):\n` +
-            `When interaction is meaningful, the ranking of genotypes (or responses) across environmental levels changes.\n` +
-            `Mean pattern here: A2B2 is highest (33.25), while A1B1 is lowest (22.15).`,
-          deviationKeys: ["fInteraction"],
-        });
-
-      case "lattice":
-        return renderEducationalModule({
-          moduleId: "lattice",
-          title: "Lattice Square Design (Example Output)",
-          subtitle: "Incomplete blocks approach to control heterogeneity; includes example lattice ANOVA tables.",
-          tables: [
-            buildTable(
-              ["Source", "SS", "df", "MS", "F"],
-              [
-                ["Treatments", 312.8, 15, 20.85, 5.21],
-                ["Lattice error", 240.6, 60, 4.01, ""],
-                ["Adjusted error", 210.2, 54, 3.89, ""],
-              ]
-            ),
-          ],
-          chart: {
-            type: "bar",
-            title: "Example adjusted means (top 6)",
-            labels: ["T6", "T3", "T9", "T1", "T12", "T5"],
-            values: [31.6, 30.8, 29.9, 28.7, 27.8, 27.4],
-            deviationPayload: { topMean: 31.6 },
-          },
-          interpretation:
-            `Lattice designs are suited for many treatments when field heterogeneity inflates error variance.\n\n` +
-            `In the example: treatment MS is large compared with lattice error MS, indicating significant treatment effects.\n` +
-            `Because lattice reduces comparisons within more homogeneous subsets, the adjusted error MS is smaller, improving the clarity of treatment differences.`,
-          deviationKeys: ["topMean"],
-        });
-
-      case "augmented":
-        return renderEducationalModule({
-          moduleId: "augmented",
-          title: "Augmented Design (Checks + New Entries)",
-          subtitle: "Example output for augmented randomized incomplete block design with adjustments.",
-          tables: [
-            buildTable(
-              ["Genotype", "Adjusted Mean", "Check Category"],
-              [
-                ["C1", 29.12, "Check"],
-                ["C2", 31.05, "Check"],
-                ["C3", 28.42, "Check"],
-                ["N1", 33.20, "New"],
-                ["N2", 30.66, "New"],
-                ["N3", 34.10, "New"],
-              ]
-            ),
-          ],
-          chart: {
-            type: "bar",
-            title: "Adjusted means (checks vs new)",
-            labels: ["C1", "C2", "C3", "N1", "N2", "N3"],
-            values: [29.12, 31.05, 28.42, 33.2, 30.66, 34.1],
-            deviationPayload: { maxAdjusted: 34.1 },
-          },
-          interpretation:
-            `Augmented designs allow testing many new genotypes with limited replication by using repeated check entries.\n\n` +
-            `Interpretation:\n` +
-            `• Adjusted means are computed relative to checks, removing block variation.\n` +
-            `• In the example, N3 has the highest adjusted mean (34.10), suggesting superior performance relative to checks.`,
-          deviationKeys: ["maxAdjusted"],
-        });
-
-      case "splitplot":
-        return renderEducationalModule({
-          moduleId: "splitplot",
-          title: "Split Plot Design (Example Output)",
-          subtitle: "Main plot factors (A) and subplot factors (B) with interaction; includes ANOVA layout.",
-          tables: [
-            buildTable(
-              ["Source", "SS", "df", "MS", "F"],
-              [
-                ["A (Main plot)", 410.2, 2, 205.1, 9.30],
-                ["Error (A)", 132.3, 12, 11.03, ""],
-                ["B (Sub plot)", 290.4, 3, 96.8, 6.15],
-                ["A×B", 150.1, 6, 25.0, 1.79],
-                ["Error (B)", 500.7, 36, 13.91, ""],
-              ]
-            ),
-          ],
-          chart: {
-            type: "bar",
-            title: "Example main-plot means (A1..A3)",
-            labels: ["A1", "A2", "A3"],
-            values: [24.3, 28.9, 33.1],
-            deviationPayload: { bestMain: 33.1 },
-          },
-          interpretation:
-            `Split plot designs separate experimental units by the level at which randomization/management occurs.\n\n` +
-            `In the example: A and B show strong effects (high F vs respective error terms). The interaction A×B is weaker, implying the effect of B is broadly consistent across A levels.\n\n` +
-            `For breeding decisions, choose combinations with the highest predicted/estimated mean while confirming that interaction terms are acceptable.`,
-          deviationKeys: ["bestMain"],
-        });
-
       case "path": {
         const title2 = "Path Analysis (Example)";
         showContentHeader({ title: title2, subtitle: "Example path coefficients + path diagram using a simple SVG diagram." });
@@ -1946,6 +2924,7 @@
     });
 
     $("#logoutBtn").addEventListener("click", () => setAuthed(false));
+    $("#metaBtn")?.addEventListener("click", showReportMetaModal);
 
     $$(".nav-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
