@@ -242,78 +242,135 @@
   }
 
   // -----------------------------
-  // Minimal chart drawing helpers
+  // Minimal chart drawing helpers (colors tuned for light UI)
   // -----------------------------
+  const CHART = {
+    bg: "#f8fafc",
+    ink: "#0f172a",
+    inkMuted: "#475569",
+    grid: "rgba(15, 23, 42, 0.1)",
+    bar0: "#0d9488",
+    bar1: "#2563eb",
+    point: "#0d9488",
+    pointStroke: "#0f766e",
+    lineFit: "#c2410c",
+    lineAlt: "#2563eb",
+    accentAmber: "#d97706",
+  };
+
   function setupCanvas(canvas) {
     const ctx = canvas.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(2.5, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
-    const w = Math.max(280, Math.floor(rect.width));
-    const h = Math.max(180, Math.floor(rect.height));
+    const w = Math.max(320, Math.floor(rect.width));
+    const h = Math.max(240, Math.floor(rect.height));
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (typeof ctx.imageSmoothingQuality === "string") ctx.imageSmoothingQuality = "high";
     ctx.clearRect(0, 0, w, h);
     return { ctx, w, h };
   }
 
+  function formatChartTick(n) {
+    const a = Math.abs(n);
+    if (a >= 10000) return n.toExponential(1);
+    if (a >= 100) return n.toFixed(0);
+    if (a >= 10) return n.toFixed(1);
+    if (a >= 1) return n.toFixed(2);
+    return n.toFixed(3);
+  }
+
   function drawBarChart(canvas, labels, values, { title } = {}) {
     const { ctx, w, h } = setupCanvas(canvas);
-    const pad = 34;
-    const grid = 5;
+    const padL = 52;
+    const padR = 18;
+    const padT = title ? 32 : 22;
+    const padB = 56;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
     const max = Math.max(1e-9, ...values);
     const min = 0;
-    const scale = (h - pad * 1.5) / (max - min);
-    const barW = (w - pad * 1.2) / Math.max(1, values.length);
+    const grid = 5;
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+    const scaleY = plotH / (max - min);
+    const n = Math.max(1, values.length);
+    const barSlot = plotW / n;
+    const barW = Math.max(8, Math.min(48, barSlot - 10));
 
-    // background
-    ctx.fillStyle = "rgba(0,0,0,0)";
+    ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
 
-    // title
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.14)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+
     if (title) {
-      ctx.fillStyle = "rgba(234,241,255,0.95)";
-      ctx.font = "700 12px Segoe UI, Arial";
-      ctx.fillText(title, pad, 16);
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, system-ui, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, padL, 8);
     }
 
-    // grid lines
     for (let i = 0; i <= grid; i++) {
-      const y = pad + (h - pad * 1.5) - i * ((h - pad * 1.5) / grid);
-      ctx.strokeStyle = "rgba(234,241,255,0.12)";
+      const t = i / grid;
+      const y = plotBottom - t * plotH;
+      ctx.strokeStyle = CHART.grid;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(pad, y);
-      ctx.lineTo(w - 14, y);
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + plotW, y);
       ctx.stroke();
+      const val = min + (max - min) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatChartTick(val), padL - 8, y);
     }
 
-    // bars
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, plotBottom);
+    ctx.lineTo(padL + plotW, plotBottom);
+    ctx.stroke();
+
     for (let i = 0; i < values.length; i++) {
       const v = values[i];
-      const x = pad + i * barW + 6;
-      const bh = (v - min) * scale;
-      const y = pad + (h - pad * 1.5) - bh;
+      const cx = padL + i * barSlot + barSlot / 2;
+      const x = cx - barW / 2;
+      const bh = (v - min) * scaleY;
+      const y = plotBottom - bh;
 
-      const grad = ctx.createLinearGradient(0, y, 0, y + bh);
-      grad.addColorStop(0, "rgba(82,255,202,0.95)");
-      grad.addColorStop(1, "rgba(122,162,255,0.95)");
+      const grad = ctx.createLinearGradient(0, y, 0, plotBottom);
+      grad.addColorStop(0, CHART.bar0);
+      grad.addColorStop(1, CHART.bar1);
       ctx.fillStyle = grad;
-      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
       ctx.lineWidth = 1;
-      roundRect(ctx, x, y, barW - 12, bh, 10);
+      roundRect(ctx, x, y, barW, bh, 8);
       ctx.fill();
       ctx.stroke();
 
-      // x labels (rotated)
+      if (bh > 16) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 11px Segoe UI, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(formatChartTick(v), cx, y - 4);
+      }
+
       const lbl = String(labels[i] ?? "");
-      ctx.fillStyle = "rgba(234,241,255,0.75)";
-      ctx.font = "700 10px Segoe UI, Arial";
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 11px Segoe UI, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
       ctx.save();
-      ctx.translate(x + (barW - 12) / 2, h - 10);
-      ctx.rotate(-Math.PI / 6);
-      ctx.textAlign = "right";
-      ctx.fillText(lbl, 0, 0);
+      ctx.translate(cx, plotBottom + 10);
+      ctx.rotate(-Math.PI / 7);
+      ctx.fillText(lbl.length > 12 ? lbl.slice(0, 11) + "…" : lbl, 0, 0);
       ctx.restore();
     }
   }
@@ -331,7 +388,10 @@
 
   function drawScatterPlot(canvas, points, { title, xLabel, yLabel } = {}) {
     const { ctx, w, h } = setupCanvas(canvas);
-    const pad = 42;
+    const padL = 54;
+    const padR = 22;
+    const padT = title ? 34 : 24;
+    const padB = 44;
     const xs = points.map((p) => p.x);
     const ys = points.map((p) => p.y);
     const minX = Math.min(...xs);
@@ -340,47 +400,119 @@
     const maxY = Math.max(...ys);
     const rangeX = Math.max(1e-9, maxX - minX);
     const rangeY = Math.max(1e-9, maxY - minY);
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+    const plotLeft = padL;
+    const plotRight = padL + plotW;
+    const gx = (xv) => plotLeft + ((xv - minX) / rangeX) * plotW;
+    const gy = (yv) => plotBottom - ((yv - minY) / rangeY) * plotH;
 
-    // title
+    ctx.fillStyle = CHART.bg;
+    ctx.fillRect(0, 0, w, h);
+
     if (title) {
-      ctx.fillStyle = "rgba(234,241,255,0.95)";
-      ctx.font = "700 12px Segoe UI, Arial";
-      ctx.fillText(title, pad, 16);
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, system-ui, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, padL, 8);
     }
 
-    // axes/grid
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.14)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+
     const grid = 5;
     for (let i = 0; i <= grid; i++) {
-      const gy = pad + (h - pad * 1.5) - i * ((h - pad * 1.5) / grid);
-      ctx.strokeStyle = "rgba(234,241,255,0.12)";
+      const t = i / grid;
+      const y = plotBottom - t * plotH;
+      ctx.strokeStyle = CHART.grid;
       ctx.beginPath();
-      ctx.moveTo(pad, gy);
-      ctx.lineTo(w - 14, gy);
+      ctx.moveTo(plotLeft, y);
+      ctx.lineTo(plotRight, y);
       ctx.stroke();
+      const val = minY + (maxY - minY) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatChartTick(val), plotLeft - 8, y);
+    }
+    for (let j = 0; j <= grid; j++) {
+      const t = j / grid;
+      const x = plotLeft + t * plotW;
+      ctx.strokeStyle = CHART.grid;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      const val = minX + (maxX - minX) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 11px Segoe UI, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(formatChartTick(val), x, plotBottom + 6);
     }
 
-    // points
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, plotBottom);
+    ctx.lineTo(plotRight, plotBottom);
+    ctx.moveTo(plotLeft, plotTop);
+    ctx.lineTo(plotLeft, plotBottom);
+    ctx.stroke();
+
     points.forEach((p) => {
-      const px = pad + ((p.x - minX) / rangeX) * (w - pad * 1.2);
-      const py = pad + (h - pad * 1.5) - ((p.y - minY) / rangeY) * (h - pad * 1.5);
-      ctx.fillStyle = "rgba(82,255,202,0.9)";
-      ctx.strokeStyle = "rgba(255,255,255,0.20)";
-      ctx.lineWidth = 1;
+      const px = gx(p.x);
+      const py = gy(p.y);
+      ctx.fillStyle = CHART.point;
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(px, py, 4.4, 0, Math.PI * 2);
+      ctx.arc(px, py, 5.2, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
+      ctx.strokeStyle = CHART.pointStroke;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(px, py, 5.2, 0, Math.PI * 2);
       ctx.stroke();
     });
 
-    // labels
-    ctx.fillStyle = "rgba(234,241,255,0.78)";
-    ctx.font = "700 11px Segoe UI, Arial";
-    ctx.fillText(xLabel || "", w - pad + 2, h - 8);
+    ctx.fillStyle = CHART.inkMuted;
+    ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(xLabel || "", (plotLeft + plotRight) / 2, h - 18);
     ctx.save();
-    ctx.translate(12, h / 2);
+    ctx.translate(16, (plotTop + plotBottom) / 2);
     ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
     ctx.fillText(yLabel || "", 0, 0);
     ctx.restore();
+  }
+
+  /** Matches drawScatterPlot layout so overlays (regression line, labels) align. */
+  function scatterPlotGeo(w, h, withTitle) {
+    const padL = 54;
+    const padR = 22;
+    const padT = withTitle ? 34 : 24;
+    const padB = 44;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const plotBottom = padT + plotH;
+    return { padL, padR, padT, padB, plotW, plotH, plotBottom };
+  }
+
+  function projectScatterXY(w, h, withTitle, minX, rangeX, minY, rangeY, x, y) {
+    const g = scatterPlotGeo(w, h, withTitle);
+    return {
+      px: g.padL + ((x - minX) / rangeX) * g.plotW,
+      py: g.plotBottom - ((y - minY) / rangeY) * g.plotH,
+    };
   }
 
   // -----------------------------
@@ -855,18 +987,18 @@
     modal.id = "profModal";
     modal.innerHTML = `
       <style>
-        #profModal{position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:rgba(0,0,0,0.55);padding:18px;opacity:0;pointer-events:none;transition:opacity .15s ease}
+        #profModal{position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:rgba(15,23,42,0.45);padding:18px;opacity:0;pointer-events:none;transition:opacity .15s ease}
         #profModal.open{opacity:1;pointer-events:auto}
-        #profModal .box{width:min(860px,100%);background:rgba(10,14,30,0.92);border:1px solid rgba(255,255,255,0.14);border-radius:18px;box-shadow:0 28px 90px rgba(0,0,0,0.65);padding:16px}
+        #profModal .box{width:min(860px,100%);background:#fff;border:1px solid #c5cdd8;border-radius:18px;box-shadow:0 24px 60px rgba(15,23,42,0.12);padding:16px;color:#0f172a}
         #profModal header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
-        #profModal h3{margin:0;font-size:18px}
-        #profModal .close{appearance:none;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#eaf1ff;border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:850}
+        #profModal h3{margin:0;font-size:18px;color:#0f172a}
+        #profModal .close{appearance:none;border:1px solid #c5cdd8;background:#f4f6f9;color:#0f172a;border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:850}
         #profModal .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-        #profModal textarea{width:100%;min-height:88px;background:rgba(0,0,0,0.18);border:1px solid rgba(255,255,255,0.16);border-radius:14px;color:#eaf1ff;padding:12px}
+        #profModal textarea{width:100%;min-height:88px;background:#fff;border:1px solid #c5cdd8;border-radius:14px;color:#0f172a;padding:12px}
         #profModal .searchBox{display:flex;gap:10px;margin-top:10px;align-items:center}
-        #profModal input{flex:1;background:rgba(0,0,0,0.18);border:1px solid rgba(255,255,255,0.16);border-radius:14px;color:#eaf1ff;padding:12px}
-        #profModal .answer{margin-top:12px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);border-radius:14px;padding:12px;white-space:pre-wrap}
-        #profModal .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:rgba(234,241,255,0.85);font-weight:700;font-size:12px}
+        #profModal input{flex:1;background:#fff;border:1px solid #c5cdd8;border-radius:14px;color:#0f172a;padding:12px}
+        #profModal .answer{margin-top:12px;background:#f4f6f9;border:1px solid #c5cdd8;border-radius:14px;padding:12px;white-space:pre-wrap;color:#0f172a}
+        #profModal .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:#475569;font-weight:700;font-size:12px}
         @media (max-width:900px){#profModal .row{grid-template-columns:1fr}}
       </style>
       <div class="box" role="dialog" aria-modal="true" aria-label="BKQuant Professor">
@@ -995,15 +1127,15 @@
     modal.id = "metaModal";
     modal.innerHTML = `
       <style>
-        #metaModal{position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:rgba(0,0,0,0.55);padding:18px;opacity:0;pointer-events:none;transition:opacity .15s ease}
+        #metaModal{position:fixed;inset:0;z-index:999;display:grid;place-items:center;background:rgba(15,23,42,0.45);padding:18px;opacity:0;pointer-events:none;transition:opacity .15s ease}
         #metaModal.open{opacity:1;pointer-events:auto}
-        #metaModal .box{width:min(860px,100%);background:rgba(10,14,30,0.92);border:1px solid rgba(255,255,255,0.14);border-radius:18px;box-shadow:0 28px 90px rgba(0,0,0,0.65);padding:16px}
+        #metaModal .box{width:min(860px,100%);background:#fff;border:1px solid #c5cdd8;border-radius:18px;box-shadow:0 24px 60px rgba(15,23,42,0.12);padding:16px;color:#0f172a}
         #metaModal header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
-        #metaModal h3{margin:0;font-size:18px}
-        #metaModal .close{appearance:none;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#eaf1ff;border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:850}
+        #metaModal h3{margin:0;font-size:18px;color:#0f172a}
+        #metaModal .close{appearance:none;border:1px solid #c5cdd8;background:#f4f6f9;color:#0f172a;border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:850}
         #metaModal .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-        #metaModal label{display:grid;gap:6px;font-weight:700;font-size:12.5px;color:rgba(234,241,255,0.92)}
-        #metaModal input{width:100%;padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,0.16);background:rgba(0,0,0,0.18);color:#eaf1ff}
+        #metaModal label{display:grid;gap:6px;font-weight:700;font-size:12.5px;color:#334155}
+        #metaModal input{width:100%;padding:12px;border-radius:14px;border:1px solid #c5cdd8;background:#fff;color:#0f172a}
         #metaModal .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
         @media (max-width:900px){#metaModal .grid{grid-template-columns:1fr}}
       </style>
@@ -1294,11 +1426,11 @@
     if (!el) return;
     if (!text) {
       el.textContent = "Run status: idle";
-      el.style.background = "rgba(255,255,255,0.10)";
+      el.style.background = "#e2e8f0";
       return;
     }
     el.textContent = `Run status: ${text}`;
-    el.style.background = busy ? "rgba(122,162,255,0.25)" : "rgba(82,255,202,0.20)";
+    el.style.background = busy ? "rgba(29, 78, 216, 0.12)" : "rgba(15, 118, 110, 0.12)";
   }
 
   function updateDataQualityBadge(moduleId) {
@@ -1308,12 +1440,12 @@
     const raw = String(m.qualityScore || "").match(/(\d+)/);
     const score = raw ? Number(raw[1]) : null;
     let txt = "Data quality: N/A";
-    let bg = "rgba(255,255,255,0.10)";
+    let bg = "#e2e8f0";
     if (Number.isFinite(score)) {
       txt = `Data quality: ${score}/100`;
-      if (score >= 80) bg = "rgba(82,255,202,0.20)";
-      else if (score >= 60) bg = "rgba(255,209,102,0.24)";
-      else bg = "rgba(255,92,122,0.24)";
+      if (score >= 80) bg = "rgba(15, 118, 110, 0.15)";
+      else if (score >= 60) bg = "rgba(217, 119, 6, 0.15)";
+      else bg = "rgba(220, 38, 38, 0.12)";
     }
     badge.textContent = txt;
     badge.style.background = bg;
@@ -3302,39 +3434,30 @@
     });
 
     function drawScatterWithLine(canvas, xs, ys, a, b) {
-      // Draw scatter + fitted line
       drawScatterPlot(canvas, xs.map((x, i) => ({ x, y: ys[i] })), { title: "Scatter + fitted line", xLabel: "X", yLabel: "Y" });
       const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-
-      // Map coordinates (same as scatter)
-      const pad = 42;
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
       const minY = Math.min(...ys);
       const maxY = Math.max(...ys);
       const rangeX = Math.max(1e-9, maxX - minX);
       const rangeY = Math.max(1e-9, maxY - minY);
-
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
       const x1 = minX;
       const y1 = a + b * x1;
       const x2 = maxX;
       const y2 = a + b * x2;
-      const px1 = pad + ((x1 - minX) / rangeX) * (w - pad * 1.2);
-      const py1 = pad + (h - pad * 1.5) - ((y1 - minY) / rangeY) * (h - pad * 1.5);
-      const px2 = pad + ((x2 - minX) / rangeX) * (w - pad * 1.2);
-      const py2 = pad + (h - pad * 1.5) - ((y2 - minY) / rangeY) * (h - pad * 1.5);
-
-      ctx.strokeStyle = "rgba(255,209,102,0.9)";
+      const p1 = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, x1, y1);
+      const p2 = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, x2, y2);
+      ctx.strokeStyle = CHART.lineFit;
       ctx.lineWidth = 2.5;
       ctx.beginPath();
-      ctx.moveTo(px1, py1);
-      ctx.lineTo(px2, py2);
+      ctx.moveTo(p1.px, p1.py);
+      ctx.lineTo(p2.px, p2.py);
       ctx.stroke();
     }
 
@@ -3468,77 +3591,43 @@
     });
 
     function drawPCDirections(canvas, xs, ys, pc1, pc2) {
-      // draw scatter + arrows for PC1/PC2 (as direction in X-Y plane)
-      const { ctx, w, h } = setupCanvas(canvas);
-      const pad = 42;
+      const pts = xs.map((x, i) => ({ x, y: ys[i] }));
+      drawScatterPlot(canvas, pts, { title: "PCA scatter with PC directions", xLabel: "Trait 1", yLabel: "Trait 2" });
+      const ctx = canvas.getContext("2d");
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
       const minY = Math.min(...ys);
       const maxY = Math.max(...ys);
       const rangeX = Math.max(1e-9, maxX - minX);
       const rangeY = Math.max(1e-9, maxY - minY);
-
-      // title
-      ctx.fillStyle = "rgba(234,241,255,0.95)";
-      ctx.font = "700 12px Segoe UI, Arial";
-      ctx.fillText("PCA scatter with PC directions", pad, 16);
-
-      // grid
-      for (let i = 0; i <= 5; i++) {
-        const gy = pad + (h - pad * 1.5) - i * ((h - pad * 1.5) / 5);
-        ctx.strokeStyle = "rgba(234,241,255,0.12)";
-        ctx.beginPath();
-        ctx.moveTo(pad, gy);
-        ctx.lineTo(w - 14, gy);
-        ctx.stroke();
-      }
-
-      // scatter points
-      xs.forEach((x, i) => {
-        const y = ys[i];
-        const px = pad + ((x - minX) / rangeX) * (w - pad * 1.2);
-        const py = pad + (h - pad * 1.5) - ((y - minY) / rangeY) * (h - pad * 1.5);
-        ctx.fillStyle = "rgba(82,255,202,0.9)";
-        ctx.strokeStyle = "rgba(255,255,255,0.20)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(px, py, 4.4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      });
-
-      // Center point (mean)
       const cx = mean(xs);
       const cy = mean(ys);
-      const centerPx = pad + ((cx - minX) / rangeX) * (w - pad * 1.2);
-      const centerPy = pad + (h - pad * 1.5) - ((cy - minY) / rangeY) * (h - pad * 1.5);
-
+      const center = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, cx, cy);
       const arrowLenPx = 110;
       function toPx(dx, dy) {
-        // direction vector in data units -> approximate pixel with scaling
         const endX = cx + dx;
         const endY = cy + dy;
-        const ex = pad + ((endX - minX) / rangeX) * (w - pad * 1.2);
-        const ey = pad + (h - pad * 1.5) - ((endY - minY) / rangeY) * (h - pad * 1.5);
-        const vx = ex - centerPx;
-        const vy = ey - centerPy;
+        const end = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, endX, endY);
+        const vx = end.px - center.px;
+        const vy = end.py - center.py;
         const mag = Math.sqrt(vx * vx + vy * vy) || 1;
         const s = arrowLenPx / mag;
-        return { x2: centerPx + vx * s, y2: centerPy + vy * s };
+        return { x2: center.px + vx * s, y2: center.py + vy * s };
       }
-
       const end1 = toPx(pc1.x * 1.0, pc1.y * 1.0);
       const end2 = toPx(pc2.x * 1.0, pc2.y * 1.0);
-
-      drawArrow(ctx, centerPx, centerPy, end1.x2, end1.y2, "rgba(255,209,102,0.95)");
-      drawArrow(ctx, centerPx, centerPy, end2.x2, end2.y2, "rgba(122,162,255,0.95)");
-
-      // labels
-      ctx.fillStyle = "rgba(255,209,102,0.95)";
-      ctx.font = "800 12px Segoe UI, Arial";
+      drawArrow(ctx, center.px, center.py, end1.x2, end1.y2, CHART.accentAmber);
+      drawArrow(ctx, center.px, center.py, end2.x2, end2.y2, CHART.lineAlt);
+      ctx.fillStyle = CHART.accentAmber;
+      ctx.font = "800 12px Segoe UI, system-ui, sans-serif";
       ctx.fillText("PC1", end1.x2 + 6, end1.y2 - 6);
-      ctx.fillStyle = "rgba(122,162,255,0.95)";
-      ctx.font = "800 12px Segoe UI, Arial";
+      ctx.fillStyle = CHART.lineAlt;
+      ctx.font = "800 12px Segoe UI, system-ui, sans-serif";
       ctx.fillText("PC2", end2.x2 + 6, end2.y2 - 6);
     }
 
@@ -3832,10 +3921,10 @@
         "beforeend",
         `<defs>
           <marker id="pArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-            <path d="M0,0 L10,5 L0,10 Z" fill="rgba(255,209,102,0.95)"></path>
+            <path d="M0,0 L10,5 L0,10 Z" fill="#d97706"></path>
           </marker>
           <marker id="gArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-            <path d="M0,0 L10,5 L0,10 Z" fill="rgba(180,200,255,0.75)"></path>
+            <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"></path>
           </marker>
         </defs>`
       );
@@ -3849,8 +3938,8 @@
           const b = xs[j];
           svg.insertAdjacentHTML(
             "beforeend",
-            `<path d="M ${a.x + 40} ${a.y} L ${b.x + 40} ${b.y}" stroke="rgba(234,241,255,0.25)" stroke-width="2" fill="none" marker-end="url(#gArrow)"></path>
-             <text x="${a.x + 55}" y="${(a.y + b.y) / 2 - 6}" fill="rgba(234,241,255,0.72)" font-size="12" font-weight="800">r=${r.toFixed(2)}</text>`
+            `<path d="M ${a.x + 40} ${a.y} L ${b.x + 40} ${b.y}" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#gArrow)"></path>
+             <text x="${a.x + 55}" y="${(a.y + b.y) / 2 - 6}" fill="#475569" font-size="12" font-weight="800">r=${r.toFixed(2)}</text>`
           );
         }
       }
@@ -3859,15 +3948,15 @@
       xs.forEach((pt, i) => {
         svg.insertAdjacentHTML(
           "beforeend",
-          `<rect x="${pt.x - 80}" y="${pt.y - 24}" width="160" height="48" rx="16" fill="rgba(82,255,202,0.08)" stroke="rgba(255,255,255,0.18)"></rect>
-           <text x="${pt.x}" y="${pt.y + 6}" text-anchor="middle" fill="rgba(234,241,255,0.92)" font-size="16" font-weight="900">${qs(names[i])}</text>`
+          `<rect x="${pt.x - 80}" y="${pt.y - 24}" width="160" height="48" rx="16" fill="rgba(13,148,136,0.12)" stroke="#c5cdd8"></rect>
+           <text x="${pt.x}" y="${pt.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="900">${qs(names[i])}</text>`
         );
       });
       svg.insertAdjacentHTML(
         "beforeend",
-        `<rect x="${yNode.x - 90}" y="${yNode.y - 26}" width="180" height="52" rx="16" fill="rgba(255,209,102,0.10)" stroke="rgba(255,255,255,0.20)"></rect>
-         <text x="${yNode.x}" y="${yNode.y + 6}" text-anchor="middle" fill="rgba(234,241,255,0.92)" font-size="16" font-weight="950">${qs(yName)}</text>
-         <text x="${yNode.x}" y="${yNode.y + 32}" text-anchor="middle" fill="rgba(234,241,255,0.72)" font-size="12" font-weight="800">Residual=${residual.toFixed(3)}</text>`
+        `<rect x="${yNode.x - 90}" y="${yNode.y - 26}" width="180" height="52" rx="16" fill="rgba(217,119,6,0.12)" stroke="#c5cdd8"></rect>
+         <text x="${yNode.x}" y="${yNode.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="950">${qs(yName)}</text>
+         <text x="${yNode.x}" y="${yNode.y + 32}" text-anchor="middle" fill="#64748b" font-size="12" font-weight="800">Residual=${residual.toFixed(3)}</text>`
       );
 
       // arrows from X -> Y with direct effects
@@ -3879,12 +3968,12 @@
         const endY = yNode.y + (i - (xs.length - 1) / 2) * 12;
         const midX = (startX + endX) / 2;
         const midY = (startY + endY) / 2;
-        const col = p >= 0 ? "rgba(82,255,202,0.95)" : "rgba(255,92,122,0.92)";
+        const col = p >= 0 ? "#0d9488" : "#dc2626";
         svg.insertAdjacentHTML(
           "beforeend",
           `<path d="M ${startX} ${startY} C ${startX + 110} ${startY}, ${endX - 120} ${endY}, ${endX} ${endY}" stroke="${col}" stroke-width="4" fill="none" marker-end="url(#pArrow)"></path>
            <text x="${midX}" y="${midY - 8}" fill="${col}" font-size="13" font-weight="950">p=${p.toFixed(3)}</text>
-           <text x="${midX}" y="${midY + 10}" fill="rgba(234,241,255,0.68)" font-size="12" font-weight="800">r=${rxy[i].toFixed(2)}</text>`
+           <text x="${midX}" y="${midY + 10}" fill="#64748b" font-size="12" font-weight="800">r=${rxy[i].toFixed(2)}</text>`
         );
       });
     }
@@ -4417,14 +4506,12 @@
     }
 
     function drawDiallelGraph(canvas, points, fit) {
-      // base scatter
       drawScatterPlot(canvas, points, { title: "Diallel graphical approach (Wr vs Vr)", xLabel: "Vr", yLabel: "Wr" });
       const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-      const pad = 42;
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const xs = points.map((p) => p.x);
       const ys = points.map((p) => p.y);
       const minX = Math.min(...xs);
@@ -4434,30 +4521,23 @@
       const rangeX = Math.max(1e-9, maxX - minX);
       const rangeY = Math.max(1e-9, maxY - minY);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-      // fitted line y = a + bx
       const x1 = minX;
       const y1 = fit.intercept + fit.slope * x1;
       const x2 = maxX;
       const y2 = fit.intercept + fit.slope * x2;
-      const px1 = pad + ((x1 - minX) / rangeX) * (w - pad * 1.2);
-      const py1 = pad + (h - pad * 1.5) - ((y1 - minY) / rangeY) * (h - pad * 1.5);
-      const px2 = pad + ((x2 - minX) / rangeX) * (w - pad * 1.2);
-      const py2 = pad + (h - pad * 1.5) - ((y2 - minY) / rangeY) * (h - pad * 1.5);
-      ctx.strokeStyle = "rgba(255,209,102,0.95)";
+      const p1 = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, x1, y1);
+      const p2 = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, x2, y2);
+      ctx.strokeStyle = CHART.lineFit;
       ctx.lineWidth = 2.5;
       ctx.beginPath();
-      ctx.moveTo(px1, py1);
-      ctx.lineTo(px2, py2);
+      ctx.moveTo(p1.px, p1.py);
+      ctx.lineTo(p2.px, p2.py);
       ctx.stroke();
-
-      // labels
-      ctx.fillStyle = "rgba(234,241,255,0.85)";
-      ctx.font = "700 11px Segoe UI, Arial";
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "700 11px Segoe UI, system-ui, sans-serif";
       points.forEach((p) => {
-        const px = pad + ((p.x - minX) / rangeX) * (w - pad * 1.2);
-        const py = pad + (h - pad * 1.5) - ((p.y - minY) / rangeY) * (h - pad * 1.5);
-        ctx.fillText(p.label, px + 5, py - 5);
+        const pt = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, p.x, p.y);
+        ctx.fillText(p.label, pt.px + 5, pt.py - 5);
       });
     }
 
@@ -6140,23 +6220,22 @@
 
       // plot mean vs bi (Eberhart-Russell style)
       const points = rows.map((r) => ({ x: r.mean, y: r.bi }));
-      drawScatterPlot($("#metChart"), points, { title: "Eberhart-Russell: Mean vs bi", xLabel: "Genotype mean", yLabel: "bi" });
-      const ctx = $("#metChart").getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
-      const rect = $("#metChart").getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-      const pad = 42;
+      const metCanvas = $("#metChart");
+      drawScatterPlot(metCanvas, points, { title: "Eberhart-Russell: Mean vs bi", xLabel: "Genotype mean", yLabel: "bi" });
+      const ctx = metCanvas.getContext("2d");
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+      const rect = metCanvas.getBoundingClientRect();
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
       const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
       const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "rgba(234,241,255,0.85)";
-      ctx.font = "700 11px Segoe UI, Arial";
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "700 11px Segoe UI, system-ui, sans-serif";
       rows.forEach((r) => {
-        const px = pad + ((r.mean - minX) / rx) * (w - pad * 1.2);
-        const py = pad + (h - pad * 1.5) - ((r.bi - minY) / ry) * (h - pad * 1.5);
-        ctx.fillText(r.g, px + 6, py - 6);
+        const pt = projectScatterXY(w, h, true, minX, rx, minY, ry, r.mean, r.bi);
+        ctx.fillText(r.g, pt.px + 6, pt.py - 6);
       });
 
       $("#metKpis").innerHTML = `
@@ -6293,11 +6372,10 @@
       const all = [...gPoints.map((p) => ({ x: p.x, y: p.y })), ...ePoints.map((p) => ({ x: p.x, y: p.y }))];
       drawScatterPlot(canvas, all, { title: "AMMI1-style biplot", xLabel: "Mean", yLabel: "IPCA1" });
       const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-      const pad = 42;
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const xs = all.map((p) => p.x);
       const ys = all.map((p) => p.y);
       const minX = Math.min(...xs);
@@ -6309,27 +6387,25 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       function toPx(x, y) {
-        return {
-          px: pad + ((x - minX) / rangeX) * (w - pad * 1.2),
-          py: pad + (h - pad * 1.5) - ((y - minY) / rangeY) * (h - pad * 1.5),
-        };
+        return projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, x, y);
       }
 
       // Genotypes
       ctx.font = "700 11px Segoe UI, Arial";
       gPoints.forEach((p) => {
         const { px, py } = toPx(p.x, p.y);
-        ctx.fillStyle = "rgba(82,255,202,0.95)";
+        ctx.fillStyle = "#0d9488";
         ctx.beginPath();
         ctx.arc(px, py, 5, 0, Math.PI * 2);
         ctx.fill();
+        ctx.fillStyle = CHART.ink;
         ctx.fillText(p.label, px + 6, py - 6);
       });
-      // Environments
       ePoints.forEach((p) => {
         const { px, py } = toPx(p.x, p.y);
-        ctx.fillStyle = "rgba(255,209,102,0.95)";
+        ctx.fillStyle = "#f59e0b";
         ctx.fillRect(px - 4.2, py - 4.2, 8.4, 8.4);
+        ctx.fillStyle = CHART.ink;
         ctx.fillText(p.label, px + 6, py - 6);
       });
     }
@@ -6566,23 +6642,20 @@
       ];
       drawScatterPlot(canvas, points, { title: "Discriminant score separation (LD1)", xLabel: "LD1 score", yLabel: "Group lane" });
       const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-      const pad = 42;
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const xs = points.map((p) => p.x);
       const ys = points.map((p) => p.y);
       const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
       const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
       points.forEach((p) => {
-        const px = pad + ((p.x - minX) / rx) * (w - pad * 1.2);
-        const py = pad + (h - pad * 1.5) - ((p.y - minY) / ry) * (h - pad * 1.5);
-        ctx.fillStyle = p.label.startsWith("A") ? "rgba(82,255,202,0.9)" : "rgba(255,209,102,0.9)";
+        const pt = projectScatterXY(w, h, true, minX, rx, minY, ry, p.x, p.y);
+        ctx.fillStyle = p.label.startsWith("A") ? "#0d9488" : "#d97706";
         ctx.beginPath();
-        ctx.arc(px, py, 4.8, 0, Math.PI * 2);
+        ctx.arc(pt.px, pt.py, 4.8, 0, Math.PI * 2);
         ctx.fill();
       });
     }
@@ -7320,22 +7393,20 @@
       const points = X.map((r, i) => ({ x: r[0], y: r[1] ?? 0, c: labels[i], name: `G${i + 1}` }));
       drawScatterPlot(canvas, points, { title: "Cluster scatter (Trait1 vs Trait2)", xLabel: "Trait1", yLabel: "Trait2" });
       const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(280, Math.floor(rect.width));
-      const h = Math.max(180, Math.floor(rect.height));
-      const pad = 42;
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(240, Math.floor(rect.height));
       const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
       const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
       const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
-      const colors = ["#52ffca", "#ffd166", "#7aa2ff", "#ff5c7a", "#9bff66", "#f7a8ff", "#a8ecff"];
+      const colors = ["#0d9488", "#d97706", "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#0891b2"];
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       for (const p of points) {
-        const px = pad + ((p.x - minX) / rx) * (w - pad * 1.2);
-        const py = pad + (h - pad * 1.5) - ((p.y - minY) / ry) * (h - pad * 1.5);
+        const pt = projectScatterXY(w, h, true, minX, rx, minY, ry, p.x, p.y);
         ctx.fillStyle = colors[p.c % colors.length];
         ctx.beginPath();
-        ctx.arc(px, py, pointSize, 0, Math.PI * 2);
+        ctx.arc(pt.px, pt.py, pointSize, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -7360,7 +7431,7 @@
       }
       const maxH = Math.max(1e-9, ...linkage.map((l) => l[2]));
       let cid = n;
-      ctx.strokeStyle = "rgba(234,241,255,0.9)";
+      ctx.strokeStyle = "#334155";
       ctx.lineWidth = lineW;
       for (const [a, b, dist] of linkage) {
         const xa = xPos[a], xb = xPos[b];
@@ -7757,7 +7828,7 @@
       const rows = Math.ceil(n / cols);
       const xGap = (w - 20) / cols;
       const yGap = (h - 20) / rows;
-      const colors = ["#52ffca", "#ffd166", "#7aa2ff", "#ff5c7a", "#9bff66", "#f7a8ff", "#a8ecff", "#ffb38a"];
+      const colors = ["#0d9488", "#d97706", "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#0891b2", "#ea580c"];
 
       for (let i = 0; i < n; i++) {
         const cx = 10 + (i % cols) * xGap + xGap / 2;
@@ -7781,7 +7852,7 @@
         ctx.stroke();
 
         // center dot and label
-        ctx.fillStyle = "rgba(234,241,255,0.95)";
+        ctx.fillStyle = CHART.ink;
         ctx.beginPath();
         ctx.arc(cx, cy, 1.8, 0, Math.PI * 2);
         ctx.fill();
@@ -8149,28 +8220,28 @@
             <svg id="pathDiagram" viewBox="0 0 760 280" width="100%" height="100%" style="overflow:visible">
               <defs>
                 <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-                  <path d="M0,0 L10,5 L0,10 Z" fill="rgba(255,209,102,0.95)"/>
+                  <path d="M0,0 L10,5 L0,10 Z" fill="#d97706"/>
                 </marker>
                 <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-                  <path d="M0,0 L10,5 L0,10 Z" fill="rgba(82,255,202,0.95)"/>
+                  <path d="M0,0 L10,5 L0,10 Z" fill="#0d9488"/>
                 </marker>
               </defs>
-              <rect x="20" y="30" width="220" height="220" rx="18" fill="rgba(82,255,202,0.08)" stroke="rgba(255,255,255,0.14)"/>
-              <rect x="270" y="30" width="220" height="220" rx="18" fill="rgba(122,162,255,0.08)" stroke="rgba(255,255,255,0.14)"/>
-              <rect x="520" y="30" width="220" height="220" rx="18" fill="rgba(255,209,102,0.08)" stroke="rgba(255,255,255,0.14)"/>
-              <text x="130" y="95" text-anchor="middle" fill="rgba(234,241,255,0.92)" font-size="18" font-weight="800">X1</text>
-              <text x="380" y="95" text-anchor="middle" fill="rgba(234,241,255,0.92)" font-size="18" font-weight="800">X2</text>
-              <text x="630" y="95" text-anchor="middle" fill="rgba(234,241,255,0.92)" font-size="18" font-weight="800">Y (Yield)</text>
-              <text x="130" y="135" text-anchor="middle" fill="rgba(234,241,255,0.65)" font-size="12">Direct/Indirect</text>
-              <text x="380" y="135" text-anchor="middle" fill="rgba(234,241,255,0.65)" font-size="12">Traits</text>
-              <text x="630" y="135" text-anchor="middle" fill="rgba(234,241,255,0.65)" font-size="12">Response</text>
+              <rect x="20" y="30" width="220" height="220" rx="18" fill="#f1f5f9" stroke="#c5cdd8"/>
+              <rect x="270" y="30" width="220" height="220" rx="18" fill="#f1f5f9" stroke="#c5cdd8"/>
+              <rect x="520" y="30" width="220" height="220" rx="18" fill="#f1f5f9" stroke="#c5cdd8"/>
+              <text x="130" y="95" text-anchor="middle" fill="#0f172a" font-size="18" font-weight="800">X1</text>
+              <text x="380" y="95" text-anchor="middle" fill="#0f172a" font-size="18" font-weight="800">X2</text>
+              <text x="630" y="95" text-anchor="middle" fill="#0f172a" font-size="18" font-weight="800">Y (Yield)</text>
+              <text x="130" y="135" text-anchor="middle" fill="#64748b" font-size="12">Direct/Indirect</text>
+              <text x="380" y="135" text-anchor="middle" fill="#64748b" font-size="12">Traits</text>
+              <text x="630" y="135" text-anchor="middle" fill="#64748b" font-size="12">Response</text>
 
               <!-- arrows to Y -->
-              <path d="M 240 140 C 320 140 360 120 510 120" stroke="rgba(255,209,102,0.95)" stroke-width="5" fill="none" marker-end="url(#arrow)"/>
-              <path d="M 290 180 C 350 200 410 200 510 170" stroke="rgba(82,255,202,0.95)" stroke-width="5" fill="none" marker-end="url(#arrow2)"/>
+              <path d="M 240 140 C 320 140 360 120 510 120" stroke="#d97706" stroke-width="5" fill="none" marker-end="url(#arrow)"/>
+              <path d="M 290 180 C 350 200 410 200 510 170" stroke="#0d9488" stroke-width="5" fill="none" marker-end="url(#arrow2)"/>
 
-              <text x="365" y="112" fill="rgba(255,209,102,0.95)" font-size="14" font-weight="900">pYX1 = 0.72</text>
-              <text x="380" y="198" fill="rgba(82,255,202,0.95)" font-size="14" font-weight="900">pYX2 = -0.18</text>
+              <text x="365" y="112" fill="#b45309" font-size="14" font-weight="900">pYX1 = 0.72</text>
+              <text x="380" y="198" fill="#0f766e" font-size="14" font-weight="900">pYX2 = -0.18</text>
             </svg>
           </div>
         `;
@@ -8259,11 +8330,11 @@
     fab.style.gap = "6px";
     fab.style.padding = "12px 14px";
     fab.style.borderRadius = "999px";
-    fab.style.border = "1px solid rgba(255,255,255,0.18)";
-    fab.style.background = "linear-gradient(135deg, rgba(82,255,202,0.18), rgba(122,162,255,0.18))";
-    fab.style.backdropFilter = "blur(8px)";
-    fab.style.color = "rgba(234,241,255,0.95)";
-    fab.style.boxShadow = "0 24px 90px rgba(0,0,0,0.45)";
+    fab.style.border = "1px solid #c5cdd8";
+    fab.style.background = "#fff";
+    fab.style.backdropFilter = "none";
+    fab.style.color = "#0f172a";
+    fab.style.boxShadow = "0 4px 20px rgba(15, 23, 42, 0.12)";
     fab.style.cursor = "pointer";
     fab.addEventListener("click", showProfessorModal);
     document.body.appendChild(fab);
