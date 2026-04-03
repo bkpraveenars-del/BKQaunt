@@ -12,6 +12,7 @@
   const STORAGE_KEY = "bkq_authed_v1";
   const PREV_KEY_PREFIX = "bkq_prev_module_v1:";
   const META_KEY = "bkq_report_meta_v1";
+  const BKQUANT_VERSION = "1.0";
 
   const qs = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -163,6 +164,7 @@
 
     const metaRows = [
       ["Website", "BKQuant"],
+      ["Version", `BKQuant v${BKQUANT_VERSION}`],
       ["Analysis", title],
       ["Module ID", moduleId || CURRENT_MODULE_ID || ""],
       ["Researcher", meta.researcher || ""],
@@ -172,6 +174,10 @@
       ["Season/Year", meta.season || ""],
       ["Location", meta.location || ""],
       ["Date", meta.date || new Date().toISOString().slice(0, 10)],
+      [
+        "Methodology note",
+        "Offline client-side computations. Some modules use approximate significance rules; for formal inference use standard statistical tables or peer-reviewed software.",
+      ],
     ].filter((r) => String(r[1] || "").trim().length > 0);
     const runMeta = LAST_RUN_META[moduleId || CURRENT_MODULE_ID || ""] || {};
     const runRows = [

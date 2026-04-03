@@ -92,6 +92,22 @@ body{
   pointer-events:none;
 }
 
+.brand-top-row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  flex-wrap:wrap;
+}
+.brand-linga{
+  flex:0 0 auto;
+  width:56px;
+  height:78px;
+  opacity:0.92;
+  filter: drop-shadow(0 8px 20px rgba(0,0,0,0.35));
+}
+.linga-svg{width:100%;height:100%}
+
 .logo3d{
   position:relative;
   display:flex;
