@@ -134,7 +134,7 @@
     }
   }
 
-  function exportHtmlAsDocOrXls({ title, tablesSelector = "table.data", interpretSelector = ".export-interpretation", filename, asExcel }) {
+  function exportHtmlAsDocOrXls({ title, moduleId = "", tablesSelector = "table.data", interpretSelector = ".export-interpretation", filename, asExcel }) {
     const tables = $$(tablesSelector);
     const interpretation = document.querySelector(interpretSelector)?.innerText || "";
     const meta = loadReportMeta() || {};
@@ -164,6 +164,7 @@
     const metaRows = [
       ["Website", "BKQuant"],
       ["Analysis", title],
+      ["Module ID", moduleId || CURRENT_MODULE_ID || ""],
       ["Researcher", meta.researcher || ""],
       ["Institution", meta.institution || ""],
       ["Crop", meta.crop || ""],
@@ -172,12 +173,22 @@
       ["Location", meta.location || ""],
       ["Date", meta.date || new Date().toISOString().slice(0, 10)],
     ].filter((r) => String(r[1] || "").trim().length > 0);
+    const runMeta = LAST_RUN_META[moduleId || CURRENT_MODULE_ID || ""] || {};
+    const runRows = [
+      ["Run timestamp", runMeta.timestamp || new Date().toISOString()],
+      ["Force run mode", runMeta.forceRun ? "ON" : "OFF"],
+      ["Input size", runMeta.inputSize || ""],
+      ["Standardization", runMeta.standardization || ""],
+      ["Batch preset", runMeta.batchPreset || ""],
+      ["Preprocessing log", runMeta.preprocessing || ""],
+      ["Quality score", runMeta.qualityScore || ""],
+    ].filter((r) => String(r[1] || "").trim().length > 0);
 
     const metaTable =
-      metaRows.length
+      (metaRows.length || runRows.length)
         ? `<table style="width:100%;border-collapse:collapse;margin:10px 0 14px">
             <tbody>
-              ${metaRows
+              ${[...metaRows, ...runRows]
                 .map(
                   ([k, v]) =>
                     `<tr>
@@ -750,9 +761,19 @@
 
   function showContentHeader({ title, subtitle }) {
     $("#contentHeader").innerHTML = `
-      <h3>${qs(title)}</h3>
-      <p class="muted">${qs(subtitle || "")}</p>
+      <div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <h3>${qs(title)}</h3>
+          <p class="muted">${qs(subtitle || "")}</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <span class="pill" id="runStatusBadge" style="font-weight:900">Run status: idle</span>
+          <span class="pill" id="qualityBadge" style="font-weight:900">Data quality: N/A</span>
+        </div>
+      </div>
     `;
+    updateDataQualityBadge(CURRENT_MODULE_ID);
+    setRunStatus("", false);
   }
 
   function showProfessorModal() {
@@ -1036,6 +1057,311 @@
   // -----------------------------
   // Module rendering (tables + charts)
   // -----------------------------
+  function clearValidation(containerSel) {
+    const root = document.querySelector(containerSel);
+    if (!root) return;
+    root.querySelectorAll("[data-invalid='1']").forEach((el) => {
+      el.removeAttribute("data-invalid");
+      el.style.borderColor = "";
+      el.style.boxShadow = "";
+      el.removeAttribute("title");
+    });
+  }
+
+  function markInvalidInput(el, reason) {
+    if (!el) return;
+    el.setAttribute("data-invalid", "1");
+    el.style.borderColor = "rgba(255,92,122,0.95)";
+    el.style.boxShadow = "0 0 0 2px rgba(255,92,122,0.25)";
+    el.title = reason || "Invalid input";
+  }
+
+  function validationSummaryHtml(errors) {
+    if (!errors || !errors.length) return "";
+    return `<div class="note" style="margin-top:10px;border-color:rgba(255,92,122,0.55);background:rgba(255,92,122,0.12);color:rgba(255,225,232,0.98)">
+      <b>Input validation errors (${errors.length})</b>
+      <div style="margin-top:6px;white-space:pre-wrap">${qs(errors.slice(0, 8).join("\n"))}${errors.length > 8 ? "\n..." : ""}</div>
+    </div>`;
+  }
+
+  function assumptionsChecklistHtml(title, items) {
+    return `<h4>${qs(title)}</h4>${buildTable(["Assumption", "Status", "Note"], items.map((x) => [x.assumption, x.status, x.note || ""]))}`;
+  }
+
+  const PROJECTS_KEY = "bkq_saved_projects_v1";
+  let CURRENT_MODULE_ID = "";
+  let CURRENT_BATCH_PRESET = "";
+  let FORCE_RUN_MODE = false;
+  let STRICT_MODE = false;
+  const RUN_WARNINGS = {};
+  const LAST_RUN_META = {};
+
+  function isForceRunEnabled() {
+    return FORCE_RUN_MODE;
+  }
+
+  function setRunWarning(moduleId, warningText) {
+    RUN_WARNINGS[moduleId] = warningText || "";
+  }
+
+  function getRunWarning(moduleId) {
+    return RUN_WARNINGS[moduleId] || "";
+  }
+
+  function shouldBlockForValidation(moduleId, errors, mountSel) {
+    if (!errors || !errors.length) {
+      setRunWarning(moduleId, "");
+      return false;
+    }
+    const el = document.querySelector(mountSel);
+    if (isForceRunEnabled()) {
+      const msg = `Force run enabled: ${errors.length} validation issue(s) were bypassed.`;
+      if (el) {
+        el.innerHTML = `${validationSummaryHtml(errors)}<div class="note" style="margin-top:8px;border-color:rgba(255,209,102,0.55);background:rgba(255,209,102,0.12)">⚠ ${qs(msg)}</div>`;
+      }
+      setRunWarning(moduleId, msg);
+      return false;
+    }
+    if (el) el.innerHTML = validationSummaryHtml(errors);
+    setRunWarning(moduleId, "");
+    return true;
+  }
+
+  function matrixValidationErrors(R, opts = {}) {
+    const errors = [];
+    const n = R.length;
+    const minVal = Number.isFinite(opts.minVal) ? opts.minVal : -1;
+    const maxVal = Number.isFinite(opts.maxVal) ? opts.maxVal : 1;
+    const requireUnitDiag = opts.requireUnitDiag !== false;
+    const tol = Number.isFinite(opts.tolerance) ? opts.tolerance : 1e-6;
+    for (let i = 0; i < n; i++) {
+      if (!Array.isArray(R[i]) || R[i].length !== n) {
+        errors.push("Matrix must be square.");
+        return errors;
+      }
+      for (let j = 0; j < n; j++) {
+        const v = R[i][j];
+        if (!Number.isFinite(v)) errors.push(`Invalid numeric value at [${i + 1}, ${j + 1}]`);
+        if (Number.isFinite(v) && (v < minVal || v > maxVal)) {
+          errors.push(`Value out of range at [${i + 1}, ${j + 1}] (expected ${minVal}..${maxVal})`);
+        }
+        if (requireUnitDiag && i === j && Number.isFinite(v) && Math.abs(v - 1) > tol) {
+          errors.push(`Diagonal at [${i + 1}, ${j + 1}] must be 1`);
+        }
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (Number.isFinite(R[i][j]) && Number.isFinite(R[j][i]) && Math.abs(R[i][j] - R[j][i]) > tol) {
+          errors.push(`Matrix is not symmetric at [${i + 1}, ${j + 1}] and [${j + 1}, ${i + 1}]`);
+        }
+      }
+    }
+    return errors;
+  }
+
+  function zScoreColumns(X) {
+    const n = X.length;
+    const p = X[0]?.length || 0;
+    const mu = Array(p).fill(0);
+    const sd = Array(p).fill(0);
+    for (let j = 0; j < p; j++) mu[j] = mean(X.map((r) => r[j]));
+    for (let j = 0; j < p; j++) {
+      const v = mean(X.map((r) => {
+        const d = r[j] - mu[j];
+        return d * d;
+      }));
+      sd[j] = Math.sqrt(v) || 1;
+    }
+    const Z = X.map((r) => r.map((v, j) => (v - mu[j]) / sd[j]));
+    return { Z, mu, sd };
+  }
+
+  function residualSummary(residuals) {
+    if (!residuals?.length) return { rmse: 0, mae: 0, maxAbs: 0 };
+    const abs = residuals.map((e) => Math.abs(e));
+    const rmse = Math.sqrt(mean(residuals.map((e) => e * e)));
+    const mae = mean(abs);
+    const maxAbs = Math.max(...abs);
+    return { rmse, mae, maxAbs };
+  }
+
+  function outlierFlags(values) {
+    if (!values?.length) return { count: 0, indices: [], bounds: [0, 0] };
+    const s = values.slice().sort((a, b) => a - b);
+    const q1 = s[Math.floor((s.length - 1) * 0.25)];
+    const q3 = s[Math.floor((s.length - 1) * 0.75)];
+    const iqr = q3 - q1;
+    const lo = q1 - 1.5 * iqr;
+    const hi = q3 + 1.5 * iqr;
+    const indices = [];
+    values.forEach((v, i) => {
+      if (v < lo || v > hi) indices.push(i);
+    });
+    return { count: indices.length, indices, bounds: [lo, hi] };
+  }
+
+  function drawResidualMiniPlot(canvas, residuals, title = "Residuals vs index") {
+    const pts = residuals.map((e, i) => ({ x: i + 1, y: e }));
+    drawScatterPlot(canvas, pts, { title, xLabel: "Obs", yLabel: "Residual" });
+  }
+
+  function qualityScoreHtml(items) {
+    const score = Math.max(0, Math.min(100, Math.round(mean(items.map((x) => x.pass ? 100 : 45)))));
+    const rows = items.map((x) => [x.check, x.pass ? "Pass" : "Warn", x.note || ""]);
+    return `<div class="kpi-row" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:10px">
+      <div class="kpi"><div class="label">Analysis quality score</div><div class="value">${score}/100</div></div>
+      <div class="kpi"><div class="label">Checks passed</div><div class="value">${items.filter((x) => x.pass).length}/${items.length}</div></div>
+      <div class="kpi"><div class="label">Status</div><div class="value">${score >= 80 ? "Good" : score >= 60 ? "Caution" : "Low confidence"}</div></div>
+    </div>${buildTable(["Check", "Status", "Note"], rows)}`;
+  }
+
+  function setRunMeta(moduleId, payload) {
+    LAST_RUN_META[moduleId] = { ...(payload || {}), timestamp: new Date().toISOString() };
+    if (moduleId === CURRENT_MODULE_ID) updateDataQualityBadge(moduleId);
+  }
+
+  function setRunStatus(text = "", busy = false) {
+    const el = document.getElementById("runStatusBadge");
+    if (!el) return;
+    if (!text) {
+      el.textContent = "Run status: idle";
+      el.style.background = "rgba(255,255,255,0.10)";
+      return;
+    }
+    el.textContent = `Run status: ${text}`;
+    el.style.background = busy ? "rgba(122,162,255,0.25)" : "rgba(82,255,202,0.20)";
+  }
+
+  function updateDataQualityBadge(moduleId) {
+    const badge = document.getElementById("qualityBadge");
+    if (!badge) return;
+    const m = LAST_RUN_META[moduleId] || {};
+    const raw = String(m.qualityScore || "").match(/(\d+)/);
+    const score = raw ? Number(raw[1]) : null;
+    let txt = "Data quality: N/A";
+    let bg = "rgba(255,255,255,0.10)";
+    if (Number.isFinite(score)) {
+      txt = `Data quality: ${score}/100`;
+      if (score >= 80) bg = "rgba(82,255,202,0.20)";
+      else if (score >= 60) bg = "rgba(255,209,102,0.24)";
+      else bg = "rgba(255,92,122,0.24)";
+    }
+    badge.textContent = txt;
+    badge.style.background = bg;
+  }
+
+  function strictModeShouldBlock(moduleId, qualityItems, mountSel) {
+    if (!STRICT_MODE) return false;
+    const warns = (qualityItems || []).filter((x) => !x.pass);
+    if (!warns.length) return false;
+    const el = document.querySelector(mountSel);
+    if (isForceRunEnabled()) {
+      if (el) {
+        el.innerHTML = `<div class="note" style="margin-top:8px;border-color:rgba(255,209,102,0.55);background:rgba(255,209,102,0.12)">⚠ Strict mode warning bypassed by Force run (${warns.length} warning check(s)).</div>`;
+      }
+      setRunWarning(moduleId, `Strict mode warnings bypassed (${warns.length}).`);
+      return false;
+    }
+    if (el) {
+      el.innerHTML = `<div class="note" style="margin-top:8px;border-color:rgba(255,92,122,0.55);background:rgba(255,92,122,0.12)">Strict mode blocked run due to ${warns.length} warning check(s). Disable strict mode or resolve warnings.</div>`;
+    }
+    setRunWarning(moduleId, `Strict mode blocked run (${warns.length} warning checks).`);
+    return true;
+  }
+
+  function inputStateKey(el, idx) {
+    if (el.id) return `id:${el.id}`;
+    const dataKeys = Object.keys(el.dataset || {}).sort();
+    if (dataKeys.length) return `data:${dataKeys.map((k) => `${k}=${el.dataset[k]}`).join("|")}`;
+    return `idx:${el.tagName.toLowerCase()}:${idx}`;
+  }
+
+  function captureCurrentInputState() {
+    const nodes = Array.from(document.querySelectorAll("#contentBody input, #contentBody textarea, #contentBody select"));
+    const state = {};
+    nodes.forEach((el, idx) => {
+      const key = inputStateKey(el, idx);
+      const val = el.type === "checkbox" ? !!el.checked : String(el.value ?? "");
+      state[key] = val;
+    });
+    return state;
+  }
+
+  function applyInputState(stateObj) {
+    const nodes = Array.from(document.querySelectorAll("#contentBody input, #contentBody textarea, #contentBody select"));
+    nodes.forEach((el, idx) => {
+      const key = inputStateKey(el, idx);
+      if (!(key in stateObj)) return;
+      if (el.type === "checkbox") el.checked = !!stateObj[key];
+      else el.value = String(stateObj[key]);
+    });
+  }
+
+  function loadProjects() {
+    try {
+      return JSON.parse(localStorage.getItem(PROJECTS_KEY) || "{}");
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function exportProjectsJson() {
+    const all = loadProjects();
+    const blob = JSON.stringify(all, null, 2);
+    downloadBlob(`bkquant_projects_${new Date().toISOString().slice(0, 10)}.json`, blob, "application/json");
+  }
+
+  async function importProjectsJson(file) {
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      const incoming = JSON.parse(txt);
+      if (!incoming || typeof incoming !== "object") throw new Error("Invalid file");
+      const current = loadProjects();
+      const merged = { ...current, ...incoming };
+      localStorage.setItem(PROJECTS_KEY, JSON.stringify(merged));
+      alert(`Imported ${Object.keys(incoming).length} project(s).`);
+    } catch {
+      alert("Project import failed. Please use a valid BKQuant JSON export.");
+    }
+  }
+
+  function saveCurrentProject(moduleId) {
+    const name = (window.prompt("Project name to save:", `${moduleId}-project`) || "").trim();
+    if (!name) return;
+    const all = loadProjects();
+    all[name] = { moduleId, state: captureCurrentInputState(), savedAt: new Date().toISOString() };
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(all));
+    alert(`Saved project: ${name}`);
+  }
+
+  function loadProjectIntoModule(openModuleFn) {
+    const all = loadProjects();
+    const names = Object.keys(all);
+    if (!names.length) {
+      alert("No saved projects found.");
+      return;
+    }
+    const pick = (window.prompt(`Available projects:\n${names.join("\n")}\n\nEnter project name:`) || "").trim();
+    if (!pick || !all[pick]) return;
+    const p = all[pick];
+    openModuleFn(p.moduleId);
+    setTimeout(() => {
+      applyInputState(p.state || {});
+      const btn = document.querySelector("#contentBody button[id$='Compute']");
+      btn?.click();
+    }, 0);
+  }
+
+  function setUtilityPanelHtml(html) {
+    const host = document.querySelector("#contentBody .utility-panel-host");
+    if (!host) return;
+    host.innerHTML = html || "";
+    const closeBtn = host.querySelector("[data-utility='close']");
+    closeBtn?.addEventListener("click", () => setUtilityPanelHtml(""));
+  }
+
   function applyStandardTableCaptions(containerSel = "#contentBody") {
     const root = document.querySelector(containerSel);
     if (!root) return;
@@ -1062,6 +1388,14 @@
         <button class="action-btn primary2" type="button" data-export="doc">Download DOC</button>
         <button class="action-btn primary2" type="button" data-export="xls">Download XLS</button>
         <button class="action-btn" type="button" data-export="print">Print</button>
+        <button class="action-btn" type="button" data-project="save">Save project</button>
+        <button class="action-btn" type="button" data-project="load">Load project</button>
+        <button class="action-btn" type="button" data-project="manage">Manage projects</button>
+        <button class="action-btn" type="button" data-project="export">Export projects JSON</button>
+        <button class="action-btn" type="button" data-project="import">Import projects JSON</button>
+        <button class="action-btn" type="button" data-run="selected">Run selected analyses</button>
+        <button class="action-btn" type="button" data-run="force">${FORCE_RUN_MODE ? "Force run: ON" : "Force run: OFF"}</button>
+        <button class="action-btn" type="button" data-run="strict">${STRICT_MODE ? "Strict mode: ON" : "Strict mode: OFF"}</button>
       </div>
     `;
 
@@ -1071,10 +1405,13 @@
       <div class="section">
         ${bodyHtml}
         ${exportRow}
+        <input type="file" id="projectsImportFile" accept=".json,application/json" style="display:none" />
         ${exportInterpretationEl}
+        <div class="utility-panel-host" style="margin-top:12px"></div>
       </div>
     `;
 
+    CURRENT_MODULE_ID = moduleId;
     // bind exports
     $$("#contentBody [data-export]").forEach((b) => {
       b.addEventListener("click", () => {
@@ -1090,29 +1427,83 @@
         if (type === "full") {
           exportHtmlAsDocOrXls({
             title: tableTitle,
+            moduleId,
             filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.doc`,
             asExcel: false,
           });
           exportHtmlAsDocOrXls({
             title: tableTitle,
+            moduleId,
             filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.xls`,
             asExcel: true,
           });
         } else if (type === "doc") {
           exportHtmlAsDocOrXls({
             title: tableTitle,
+            moduleId,
             filename: `${tableTitle.replace(/\s+/g, "_")}.doc`,
             asExcel: false,
           });
         } else if (type === "xls") {
           exportHtmlAsDocOrXls({
             title: tableTitle,
+            moduleId,
             filename: `${tableTitle.replace(/\s+/g, "_")}.xls`,
             asExcel: true,
           });
         }
       });
     });
+
+    $$("#contentBody [data-project]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const t = b.dataset.project;
+        if (t === "save") saveCurrentProject(moduleId);
+        if (t === "load") loadProjectIntoModule(openModule);
+        if (t === "manage") showProjectManager();
+        if (t === "export") exportProjectsJson();
+        if (t === "import") document.getElementById("projectsImportFile")?.click();
+      });
+    });
+    document.getElementById("projectsImportFile")?.addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      await importProjectsJson(f);
+      e.target.value = "";
+    });
+
+    $$("#contentBody [data-run]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const t = b.dataset.run;
+        if (t === "force") {
+          FORCE_RUN_MODE = !FORCE_RUN_MODE;
+          b.textContent = FORCE_RUN_MODE ? "Force run: ON" : "Force run: OFF";
+          return;
+        }
+        if (t === "strict") {
+          STRICT_MODE = !STRICT_MODE;
+          b.textContent = STRICT_MODE ? "Strict mode: ON" : "Strict mode: OFF";
+          return;
+        }
+        if (t === "selected") showRunSelectorPanel();
+      });
+    });
+
+    // Compute guard: show running status and prevent accidental double-clicks.
+    $("#contentBody").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[id$='Compute']");
+      if (!btn || btn.dataset.running === "1") return;
+      btn.dataset.running = "1";
+      const oldText = btn.textContent;
+      btn.textContent = "Running...";
+      btn.disabled = true;
+      setRunStatus("running", true);
+      setTimeout(() => {
+        btn.dataset.running = "0";
+        btn.textContent = oldText;
+        btn.disabled = false;
+        setRunStatus("done", false);
+      }, 500);
+    }, { capture: true });
 
     // set interpretation and deviation message (last in output)
     const interpretEl = $("#contentBody .export-interpretation");
@@ -1135,7 +1526,9 @@
   }
 
   function setInterpretation(moduleId, interpretation, deviationHtml, storePrevPayload) {
-    $("#contentBody .export-interpretation").innerHTML = `<div>${qs(interpretation)}</div>${deviationHtml || ""}`;
+    const w = getRunWarning(moduleId);
+    const warningHtml = w ? `<div class="note" style="margin-top:8px;border-color:rgba(255,209,102,0.55);background:rgba(255,209,102,0.12)">⚠ ${qs(w)}</div>` : "";
+    $("#contentBody .export-interpretation").innerHTML = `<div>${qs(interpretation)}</div>${warningHtml}${deviationHtml || ""}`;
     if (storePrevPayload) storePrev(moduleId, storePrevPayload);
   }
 
@@ -1193,6 +1586,9 @@
             <div class="chart" style="height:260px;margin-top:12px">
               <canvas id="crdBar" style="width:100%;height:100%"></canvas>
             </div>
+            <div class="chart" style="height:210px;margin-top:12px">
+              <canvas id="crdResidualPlot" style="width:100%;height:100%"></canvas>
+            </div>
             <div id="crdTableWrap" style="margin-top:12px"></div>
           </div>
         </div>
@@ -1249,6 +1645,8 @@
     $("#crdCompute").addEventListener("click", () => {
       const t = Math.max(2, Number($("#crdT").value || defaultT));
       const r = Math.max(2, Number($("#crdR").value || defaultR));
+      clearValidation("#crdGridWrap");
+      const errors = [];
 
       const matrix = [];
       for (let i = 0; i < t; i++) {
@@ -1256,12 +1654,21 @@
         for (let j = 0; j < r; j++) {
           const input = document.querySelector(`#crdGridWrap input[data-cell="t${i}r${j}"]`);
           const v = Number(input?.value ?? NaN);
+          if (!Number.isFinite(v)) {
+            errors.push(`CRD: invalid numeric value at T${i + 1}, R${j + 1}`);
+            markInvalidInput(input, "Enter a valid numeric value");
+          }
           row.push(Number.isFinite(v) ? v : 0);
         }
         matrix.push(row);
       }
+      if (shouldBlockForValidation("crd", errors, "#crdResultTop")) return;
 
       const out = crdAnova(matrix, r);
+      const crdResiduals = [];
+      for (let i = 0; i < t; i++) for (let j = 0; j < r; j++) crdResiduals.push(matrix[i][j] - out.means[i].mean);
+      const crdDiag = residualSummary(crdResiduals);
+      const crdOut = outlierFlags(matrix.flat());
 
       // Results summary text
       $("#crdResultTop").innerHTML = `
@@ -1269,7 +1676,7 @@
           <div class="kpi"><div class="label">F (Treat)</div><div class="value">${out.fStat.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">df(Treat), df(Error)</div><div class="value">${out.dfTreat}, ${out.dfError}</div></div>
           <div class="kpi"><div class="label">Approx. significance</div><div class="value">${qs(out.sig.level)}</div></div>
-          <div class="kpi"><div class="label">MS Error</div><div class="value">${out.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">MS Error</div><div class="value">${out.msError.toFixed(4)}</div></div><div class="kpi"><div class="label">Residual RMSE</div><div class="value">${crdDiag.rmse.toFixed(4)}</div></div>
         </div>
       `;
 
@@ -1277,6 +1684,7 @@
       const labels = out.means.map((m) => m.treatment);
       const values = out.means.map((m) => m.mean);
       drawBarChart($("#crdBar"), labels, values, { title: "Treatment means" });
+      drawResidualMiniPlot($("#crdResidualPlot"), crdResiduals, "CRD residuals");
 
       // ANOVA table
       const headers = ["Source", "SS", "df", "MS", "F"];
@@ -1285,7 +1693,18 @@
         ["Error", out.ssError, out.dfError, out.msError, ""],
         ["Total", out.ssTotal, out.dfTreat + out.dfError, "", ""],
       ];
-      $("#crdTableWrap").innerHTML = buildTable(headers, anovaRows);
+      const qItemsCRD = [
+        { check: "Valid numeric inputs", pass: errors.length === 0, note: errors.length ? "Some values were invalid." : "All numeric cells valid." },
+        { check: "Outlier load (IQR)", pass: crdOut.count <= Math.max(1, Math.floor(matrix.flat().length * 0.1)), note: `${crdOut.count} flagged observation(s).` },
+        { check: "Residual spread", pass: Number.isFinite(crdDiag.rmse) && crdDiag.rmse < Math.max(1e-9, Math.abs(mean(matrix.flat())) * 0.5), note: `RMSE=${crdDiag.rmse.toFixed(4)}` },
+      ];
+      if (strictModeShouldBlock("crd", qItemsCRD, "#crdResultTop")) return;
+      $("#crdTableWrap").innerHTML = `${qualityScoreHtml(qItemsCRD)}<div style="height:10px"></div>${buildTable(headers, anovaRows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
+        { assumption: "Random allocation to treatments", status: "Required", note: "Prevents systematic treatment bias." },
+        { assumption: "Independent residuals", status: "Assumed", note: "Serial/spatial trends affect precision." },
+        { assumption: "Variance homogeneity", status: "Assumed", note: "Large spread differences alter F reliability." },
+        { assumption: "Residual normality", status: "Assumed", note: "Important for strict parametric inference." }
+      ])}`;
 
       // Interpretation + deviation
       const deviationHtml = deviationBanner(
@@ -1313,6 +1732,7 @@
         deviationHtml ? deviationHtml : "",
         { fStat: out.fStat, msError: out.msError, ssTreat: out.ssTreat, ssError: out.ssError }
       );
+      setRunMeta("crd", { forceRun: isForceRunEnabled(), inputSize: `t=${t}, r=${r}`, standardization: "none", preprocessing: "No truncation; raw CRD cell values used.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsCRD.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
   }
 
@@ -1370,6 +1790,9 @@
             <div class="chart" style="height:260px;margin-top:12px">
               <canvas id="rbdBar" style="width:100%;height:100%"></canvas>
             </div>
+            <div class="chart" style="height:210px;margin-top:12px">
+              <canvas id="rbdResidualPlot" style="width:100%;height:100%"></canvas>
+            </div>
             <div id="rbdTableWrap" style="margin-top:12px"></div>
           </div>
         </div>
@@ -1424,32 +1847,45 @@
     $("#rbdCompute").addEventListener("click", () => {
       const t = Math.max(2, Number($("#rbdT").value || defaultT));
       const b = Math.max(2, Number($("#rbdB").value || defaultB));
+      clearValidation("#rbdGridWrap");
+      const errors = [];
       const matrix = [];
       for (let i = 0; i < t; i++) {
         const row = [];
         for (let j = 0; j < b; j++) {
           const input = document.querySelector(`#rbdGridWrap input[data-cell="t${i}b${j}"]`);
           const v = Number(input?.value ?? NaN);
+          if (!Number.isFinite(v)) {
+            errors.push(`RBD: invalid numeric value at T${i + 1}, B${j + 1}`);
+            markInvalidInput(input, "Enter a valid numeric value");
+          }
           row.push(Number.isFinite(v) ? v : 0);
         }
         matrix.push(row);
       }
+      if (shouldBlockForValidation("rbd", errors, "#rbdResultTop")) return;
 
       const out = rbdAnova(matrix, b, t);
+      const rbdResiduals = [];
+      for (let i = 0; i < t; i++) for (let j = 0; j < b; j++) rbdResiduals.push(matrix[i][j] - out.means[i].mean);
+      const rbdDiag = residualSummary(rbdResiduals);
+      const rbdOut = outlierFlags(matrix.flat());
 
       $("#rbdResultTop").innerHTML = `
-        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+        <div class="kpi-row" style="grid-template-columns:repeat(6, minmax(0,1fr))">
           <div class="kpi"><div class="label">F (Treat)</div><div class="value">${out.fTreat.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">df(Treat), df(Block)</div><div class="value">${out.dfTreat}, ${out.dfBlock}</div></div>
           <div class="kpi"><div class="label">df(Error)</div><div class="value">${out.dfError}</div></div>
           <div class="kpi"><div class="label">Approx. significance</div><div class="value">${qs(out.sig.level)}</div></div>
           <div class="kpi"><div class="label">MS Error</div><div class="value">${out.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Residual RMSE</div><div class="value">${rbdDiag.rmse.toFixed(4)}</div></div>
         </div>
       `;
 
       const labels = out.means.map((m) => m.treatment);
       const values = out.means.map((m) => m.mean);
       drawBarChart($("#rbdBar"), labels, values, { title: "Treatment means (over blocks)" });
+      drawResidualMiniPlot($("#rbdResidualPlot"), rbdResiduals, "RBD residuals");
 
       const headers = ["Source", "SS", "df", "MS", "F"];
       const anovaRows = [
@@ -1489,7 +1925,18 @@
           ["Phenotypic (sigma^2p)", statsRBD.sigmaP, statsRBD.pcv],
         ]
       );
-      $("#rbdTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryRBD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixRBD}`;
+      const qItemsRBD = [
+        { check: "Valid numeric inputs", pass: errors.length === 0, note: errors.length ? "Some values were invalid." : "All numeric cells valid." },
+        { check: "Outlier load (IQR)", pass: rbdOut.count <= Math.max(1, Math.floor(matrix.flat().length * 0.1)), note: `${rbdOut.count} flagged observation(s).` },
+        { check: "Residual spread", pass: Number.isFinite(rbdDiag.rmse) && rbdDiag.rmse < Math.max(1e-9, Math.abs(mean(matrix.flat())) * 0.5), note: `RMSE=${rbdDiag.rmse.toFixed(4)}` },
+      ];
+      if (strictModeShouldBlock("rbd", qItemsRBD, "#rbdResultTop")) return;
+      $("#rbdTableWrap").innerHTML = `${qualityScoreHtml(qItemsRBD)}<div style="height:10px"></div><h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryRBD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixRBD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
+        { assumption: "Randomization within blocks", status: "Required", note: "Essential for unbiased treatment comparison." },
+        { assumption: "Homogeneous residual variance", status: "Assumed", note: "Large heterogeneity affects F tests." },
+        { assumption: "Independent errors", status: "Assumed", note: "Spatial dependence can bias standard errors." },
+        { assumption: "Residual normality", status: "Assumed", note: "Check diagnostics for strict inference." }
+      ])}`;
 
       const deviationHtml = deviationBanner(
         "rbd",
@@ -1517,6 +1964,7 @@
         deviationHtml ? deviationHtml : "",
         { fTreat: out.fTreat, msError: out.msError, ssTreat: out.ssTreat, ssBlock: out.ssBlock }
       );
+      setRunMeta("rbd", { forceRun: isForceRunEnabled(), inputSize: `t=${t}, b=${b}`, standardization: "none", preprocessing: "No truncation; balanced matrix interpreted directly.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsRBD.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
   }
 
@@ -1639,6 +2087,8 @@
       const a = Math.max(2, Number($("#factA").value || defaultA));
       const b = Math.max(2, Number($("#factB").value || defaultB));
       const r = Math.max(2, Number($("#factR").value || defaultR));
+      clearValidation("#factGridWrap");
+      const errors = [];
 
       // Collect data: y[i][j][k]
       const y = [];
@@ -1649,10 +2099,15 @@
           for (let k = 0; k < r; k++) {
             const input = document.querySelector(`#factGridWrap input[data-cell="a${i}b${j}r${k}"]`);
             const v = Number(input?.value ?? NaN);
+            if (!Number.isFinite(v)) {
+              errors.push(`Factorial: invalid value at A${i + 1}B${j + 1}, R${k + 1}`);
+              markInvalidInput(input, "Enter a valid numeric value");
+            }
             y[i][j][k] = Number.isFinite(v) ? v : 0;
           }
         }
       }
+      if (shouldBlockForValidation("factorial", errors, "#factResultTop")) return;
 
       const N = a * b * r;
       let sumY2 = 0;
@@ -1798,7 +2253,12 @@
           ["Phenotypic (sigma^2p)", statsFact.sigmaP, statsFact.pcv],
         ]
       );
-      $("#factTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, rows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryFact}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixFact}`;
+      $("#factTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, rows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryFact}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixFact}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
+        { assumption: "Balanced factorial cells", status: "Required", note: "Each A×B level should have similar replication." },
+        { assumption: "Independent residuals", status: "Assumed", note: "Dependence distorts interaction significance." },
+        { assumption: "Variance homogeneity", status: "Assumed", note: "Heterogeneity affects comparison precision." },
+        { assumption: "Residual normality", status: "Assumed", note: "Required for strict parametric inference." }
+      ])}`;
 
       const deviationHtml = deviationBanner(
         "factorial",
@@ -2597,9 +3057,20 @@
     }
 
     $("#corCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      const errors = [];
       const xs = parseGridNumbers($("#corX").value);
       const ys = parseGridNumbers($("#corY").value);
       const n = Math.min(xs.length, ys.length);
+      if (xs.length !== ys.length) {
+        errors.push(`Correlation: X and Y lengths differ (X=${xs.length}, Y=${ys.length}); first ${n} values will be used.`);
+      }
+      if (n < 3) {
+        errors.push("Correlation: provide at least 3 numeric observations per trait.");
+        markInvalidInput($("#corX"), "Need at least 3 numeric values");
+        markInvalidInput($("#corY"), "Need at least 3 numeric values");
+      }
+      if (shouldBlockForValidation("correlation", errors, "#corTableWrap")) return;
       const x = xs.slice(0, n);
       const y = ys.slice(0, n);
       const pearson = pearsonCorrelation(x, y);
@@ -2615,7 +3086,11 @@
         ["Pearson (linear association)", pearson, direction(pearson)],
         ["Spearman (rank association)", spear, direction(spear)],
       ];
-      $("#corTableWrap").innerHTML = buildTable(headers, anovaRows);
+      $("#corTableWrap").innerHTML = `${buildTable(headers, anovaRows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
+        { assumption: "Paired observations (same experimental units)", status: "Required", note: "X and Y must refer to the same entries." },
+        { assumption: "Linear relation for Pearson", status: "Assumed", note: "Use Spearman for monotonic non-linear patterns." },
+        { assumption: "No extreme outlier dominance", status: "Recommended", note: "Outliers can distort coefficient magnitude." }
+      ])}`;
 
       const deviationHtml = deviationBanner(
         "correlation",
@@ -2642,6 +3117,8 @@
         deviationHtml ? deviationHtml : "",
         { pearson }
       );
+      const qCorr = n >= 5 ? 90 : 70;
+      setRunMeta("correlation", { forceRun: isForceRunEnabled(), inputSize: `n=${n}`, standardization: "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${qCorr} / 100` });
     });
 
     // compute once for initial display
@@ -2681,6 +3158,9 @@
             <h4>Results</h4>
             <div class="chart" style="height:260px;margin-top:12px">
               <canvas id="regScatter" style="width:100%;height:100%"></canvas>
+            </div>
+            <div class="chart" style="height:210px;margin-top:12px">
+              <canvas id="regResidualPlot" style="width:100%;height:100%"></canvas>
             </div>
             <div id="regTableWrap" style="margin-top:12px"></div>
           </div>
@@ -2735,14 +3215,29 @@
     }
 
     $("#regCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      const errors = [];
       const xs = parseGridNumbers($("#regX").value);
       const ys = parseGridNumbers($("#regY").value);
       const n = Math.min(xs.length, ys.length);
+      if (xs.length !== ys.length) {
+        errors.push(`Regression: X and Y lengths differ (X=${xs.length}, Y=${ys.length}); first ${n} values will be used.`);
+      }
+      if (n < 3) {
+        errors.push("Regression: provide at least 3 numeric observations.");
+        markInvalidInput($("#regX"), "Need at least 3 numeric values");
+        markInvalidInput($("#regY"), "Need at least 3 numeric values");
+      }
+      if (shouldBlockForValidation("regression", errors, "#regTableWrap")) return;
       const x = xs.slice(0, n);
       const y = ys.slice(0, n);
 
       const { slope, intercept, r, r2 } = simpleLinearRegression(x, y);
+      const regResiduals = y.map((yy, i) => yy - (intercept + slope * x[i]));
+      const regDiag = residualSummary(regResiduals);
+      const regOut = outlierFlags(y);
       drawScatterWithLine($("#regScatter"), x, y, intercept, slope);
+      drawResidualMiniPlot($("#regResidualPlot"), regResiduals, "Regression residuals");
 
       const headers = ["Regression Term", "Value"];
       const rows = [
@@ -2750,8 +3245,19 @@
         ["Slope (b) for Y = a + bX", slope],
         ["Pearson r (same as sqrt R² sign via slope)", r],
         ["R² (variance explained)", r2],
+        ["Residual RMSE", regDiag.rmse],
       ];
-      $("#regTableWrap").innerHTML = buildTable(headers, rows);
+      const qItemsReg = [
+        { check: "Sample size adequacy", pass: n >= 5, note: `n=${n}` },
+        { check: "Outlier load (IQR, Y)", pass: regOut.count <= Math.max(1, Math.floor(n * 0.15)), note: `${regOut.count} flagged value(s).` },
+        { check: "Residual spread", pass: Number.isFinite(regDiag.rmse) && regDiag.rmse < Math.max(1e-9, Math.abs(mean(y)) * 0.6), note: `RMSE=${regDiag.rmse.toFixed(4)}` },
+      ];
+      if (strictModeShouldBlock("regression", qItemsReg, "#regTableWrap")) return;
+      $("#regTableWrap").innerHTML = `${qualityScoreHtml(qItemsReg)}<div style="height:10px"></div>${buildTable(headers, rows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
+        { assumption: "Linearity (Y vs X)", status: "Required", note: "Model assumes linear trend between predictor and response." },
+        { assumption: "Independent residuals", status: "Assumed", note: "Dependence inflates/deflates uncertainty." },
+        { assumption: "Approx. constant residual variance", status: "Assumed", note: "Heteroscedasticity affects slope inference." }
+      ])}`;
 
       const deviationHtml = deviationBanner(
         "regression",
@@ -2768,13 +3274,20 @@
         `• The slope is ${direction} (${direction === "positive" ? "Y increases with X" : direction === "negative" ? "Y decreases with X" : "no clear linear change"}).\n` +
         `• R² = ${r2.toFixed(4)} indicates ${strength} explained variability in Y by X.\n\n` +
         `Use BKQuant Correlation first to understand direction/magnitude; regression extends correlation by adding a fitted predictive line.`;
+      const corrPrev = loadPrev("correlation");
+      const consistencyWarn =
+        corrPrev && Number.isFinite(corrPrev.pearson) &&
+        ((Math.abs(corrPrev.pearson) < 0.2 && r2 > 0.6) || (Math.abs(corrPrev.pearson) > 0.75 && r2 < 0.2))
+          ? `<div class="note" style="margin-top:8px;border-color:rgba(255,209,102,0.55);background:rgba(255,209,102,0.12)">⚠ Cross-module check: stored correlation (${corrPrev.pearson.toFixed(3)}) and current regression R² (${r2.toFixed(3)}) are inconsistent. Verify if inputs changed or outliers dominate.</div>`
+          : "";
 
       setInterpretation(
         "regression",
         interpretation,
-        deviationHtml ? deviationHtml : "",
+        `${deviationHtml ? deviationHtml : ""}${consistencyWarn}`,
         { slope, r2 }
       );
+      setRunMeta("regression", { forceRun: isForceRunEnabled(), inputSize: `n=${n}`, standardization: "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsReg.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
     $("#regCompute").click();
@@ -2803,6 +3316,7 @@
               Trait 2 (Y)
               <textarea id="pcaY">${Array.from({ length: defaultN }, (_, i) => (1.2 + i * 0.92 + (i % 3 === 0 ? -0.15 : 0.25)).toFixed(2)).join(", ")}</textarea>
             </label>
+            <label class="pill"><input type="checkbox" id="pcaStandardize" checked /> Standardize traits before PCA</label>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="pcaCompute">Compute PCA</button>
             </div>
@@ -2925,21 +3439,47 @@
     }
 
     $("#pcaCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      const errors = [];
       const xs = parseGridNumbers($("#pcaX").value);
       const ys = parseGridNumbers($("#pcaY").value);
       const n = Math.min(xs.length, ys.length);
+      if (xs.length !== ys.length) {
+        errors.push(`PCA: Trait lengths differ (X=${xs.length}, Y=${ys.length}); first ${n} values will be used.`);
+      }
+      if (n < 3) {
+        errors.push("PCA: provide at least 3 numeric observations per trait.");
+        markInvalidInput($("#pcaX"), "Need at least 3 numeric values");
+        markInvalidInput($("#pcaY"), "Need at least 3 numeric values");
+      }
+      if (shouldBlockForValidation("pca", errors, "#pcaTableWrap")) return;
       const x = xs.slice(0, n);
       const y = ys.slice(0, n);
+      const std = !!$("#pcaStandardize")?.checked;
+      const Zxy = std ? zScoreColumns(x.map((v, i) => [v, y[i]])).Z : null;
+      const dataX = std ? Zxy.map((r) => r[0]) : x;
+      const dataY = std ? Zxy.map((r) => r[1]) : y;
 
-      const out = pca2D(x, y);
-      drawPCDirections($("#pcaScatter"), x, y, out.vec1, out.vec2);
+      const out = pca2D(dataX, dataY);
+      drawPCDirections($("#pcaScatter"), dataX, dataY, out.vec1, out.vec2);
+      const pcaOut = outlierFlags(dataX.concat(dataY));
 
       const headers = ["Component", "Eigenvalue", "Explained Variance (%)", "Direction (normalized)"];
       const rows = [
         ["PC1", out.l1, out.explained1, `(${out.vec1.x.toFixed(4)}, ${out.vec1.y.toFixed(4)})`],
         ["PC2", out.l2, out.explained2, `(${out.vec2.x.toFixed(4)}, ${out.vec2.y.toFixed(4)})`],
       ];
-      $("#pcaTableWrap").innerHTML = buildTable(headers, rows);
+      const qItemsPCA = [
+        { check: "Sample size adequacy", pass: n >= 5, note: `n=${n}` },
+        { check: "Outlier load (IQR)", pass: pcaOut.count <= Math.max(1, Math.floor((dataX.length + dataY.length) * 0.1)), note: `${pcaOut.count} flagged value(s).` },
+        { check: "PC1 information share", pass: out.explained1 >= 50, note: `PC1=${out.explained1.toFixed(2)}%` },
+      ];
+      if (strictModeShouldBlock("pca", qItemsPCA, "#pcaTableWrap")) return;
+      $("#pcaTableWrap").innerHTML = `${qualityScoreHtml(qItemsPCA)}<div style="height:10px"></div>${buildTable(headers, rows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
+        { assumption: "Numeric traits on comparable scale", status: "Recommended", note: "Standardize before PCA when scales differ strongly." },
+        { assumption: "Linear covariance structure", status: "Assumed", note: "PCA captures linear combinations of variation." },
+        { assumption: "Adequate sample spread", status: "Required", note: "Very low variance in a trait can destabilize components." }
+      ])}`;
 
       const deviationHtml = deviationBanner(
         "pca",
@@ -2963,6 +3503,7 @@
         deviationHtml ? deviationHtml : "",
         { explained1: out.explained1, l1: out.l1, l2: out.l2 }
       );
+      setRunMeta("pca", { forceRun: isForceRunEnabled(), inputSize: `n=${n}, p=2`, standardization: std ? "z-score" : "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsPCA.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
     $("#pcaCompute").click();
@@ -3110,6 +3651,8 @@
       const wrap = $("#pathMatrixWrap");
       const Rxx = Array.from({ length: p }, () => Array(p).fill(0));
       const rxy = Array(p).fill(0);
+      const errors = [];
+      clearValidation("#pathMatrixWrap");
 
       for (let i = 0; i < p; i++) {
         for (let j = 0; j < p; j++) {
@@ -3120,6 +3663,13 @@
           if (i < j) {
             const input = wrap.querySelector(`input[data-r="x${i}x${j}"]`);
             const v = Number(input?.value ?? NaN);
+            if (!Number.isFinite(v)) {
+              errors.push(`Path: invalid correlation at X${i + 1}, X${j + 1}`);
+              markInvalidInput(input, "Enter numeric correlation");
+            } else if (v < -1 || v > 1) {
+              errors.push(`Path: correlation out of range at X${i + 1}, X${j + 1}`);
+              markInvalidInput(input, "Correlation must be between -1 and 1");
+            }
             const val = Number.isFinite(v) ? v : 0;
             Rxx[i][j] = val;
             Rxx[j][i] = val;
@@ -3127,9 +3677,17 @@
         }
         const iy = wrap.querySelector(`input[data-ry="x${i}y"]`);
         const vy = Number(iy?.value ?? NaN);
+        if (!Number.isFinite(vy)) {
+          errors.push(`Path: invalid r(X${i + 1},Y) value`);
+          markInvalidInput(iy, "Enter numeric correlation with Y");
+        } else if (vy < -1 || vy > 1) {
+          errors.push(`Path: r(X${i + 1},Y) out of range`);
+          markInvalidInput(iy, "Correlation must be between -1 and 1");
+        }
         rxy[i] = Number.isFinite(vy) ? vy : 0;
       }
-      return { Rxx, rxy };
+      errors.push(...matrixValidationErrors(Rxx, { minVal: -1, maxVal: 1, requireUnitDiag: true }));
+      return { Rxx, rxy, errors };
     }
 
     function drawPathDiagram({ names, yName, pCoeffs, Rxx, rxy, residual }) {
@@ -3212,7 +3770,8 @@
       const names = cleanNames(p);
       const yName = ($("#pathYname").value || "Y").trim() || "Y";
 
-      const { Rxx, rxy } = readCorrelationInputs(p);
+      const { Rxx, rxy, errors } = readCorrelationInputs(p);
+      if (shouldBlockForValidation("path", errors, "#pathKpis")) return;
       const inv = invertMatrix(Rxx);
       if (!inv) {
         $("#pathKpis").innerHTML = `<div class="note">Matrix inversion failed. Check correlations (matrix may be singular).</div>`;
@@ -5296,11 +5855,18 @@
       const g = Math.max(2, Math.min(30, Number($("#metG").value || defaultG)));
       const e = Math.max(2, Math.min(12, Number($("#metE").value || defaultE)));
       const M = Array.from({ length: g }, () => Array(e).fill(0));
+      const errors = [];
+      clearValidation("#metWrap");
       for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) {
-        const v = Number(document.querySelector(`#metWrap input[data-met="g${i}e${j}"]`)?.value ?? 0);
+        const input = document.querySelector(`#metWrap input[data-met="g${i}e${j}"]`);
+        const v = Number(input?.value ?? NaN);
+        if (!Number.isFinite(v)) {
+          errors.push(`MET: invalid value at G${i + 1}, E${j + 1}`);
+          markInvalidInput(input, "Enter a valid numeric value");
+        }
         M[i][j] = Number.isFinite(v) ? v : 0;
       }
-      return { g, e, M };
+      return { g, e, M, errors };
     }
 
     build(defaultG, defaultE);
@@ -5343,7 +5909,8 @@
     });
 
     $("#metCompute").addEventListener("click", () => {
-      const { g, e, M } = readMatrix();
+      const { g, e, M, errors } = readMatrix();
+      if (shouldBlockForValidation("met", errors, "#metKpis")) return;
       const gMeans = M.map((row) => mean(row));
       const eMeans = Array.from({ length: e }, (_, j) => mean(M.map((r) => r[j])));
       const overall = mean(gMeans);
@@ -5382,7 +5949,18 @@
         ["Environment", "Environment mean"],
         eMeans.map((m, j) => [`E${j + 1}`, m])
       );
-      $("#metTables").innerHTML = `<h4>Table 1. Genotype stability summary</h4>${t1}<div style="height:10px"></div><h4>Table 2. Environment means</h4>${t2}`;
+      const metOut = outlierFlags(M.flat());
+      const qItemsMET = [
+        { check: "Environment count adequacy", pass: e >= 3, note: `e=${e}` },
+        { check: "Outlier load (IQR)", pass: metOut.count <= Math.max(1, Math.floor(M.flat().length * 0.12)), note: `${metOut.count} flagged value(s).` },
+        { check: "Stability CV level", pass: stable.cv <= 25, note: `best CV=${stable.cv.toFixed(2)}%` },
+      ];
+      if (strictModeShouldBlock("met", qItemsMET, "#metKpis")) return;
+      $("#metTables").innerHTML = `${qualityScoreHtml(qItemsMET)}<div style="height:10px"></div><h4>Table 1. Genotype stability summary</h4>${t1}<div style="height:10px"></div><h4>Table 2. Environment means</h4>${t2}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 3. Assumption checklist", [
+        { assumption: "Comparable trial management across environments", status: "Required", note: "Large management differences can confound adaptation inference." },
+        { assumption: "Consistent trait measurement protocol", status: "Required", note: "Ensure same measurement scale across locations/seasons." },
+        { assumption: "Independence of environmental errors", status: "Assumed", note: "Correlated errors can bias stability metrics." }
+      ])}`;
 
       const deviationHtml = deviationBanner("met", { bestMean: best.mean, bestCV: stable.cv }, ["bestMean", "bestCV"]);
       const interpretation =
@@ -5391,10 +5969,12 @@
         `Most stable by CV: ${stable.g} (CV=${stable.cv.toFixed(2)}%).\n\n` +
         `Selection note: choose high mean + acceptable stability according to breeding objective (broad adaptation vs specific adaptation).`;
       setInterpretation("met", interpretation, deviationHtml || "", { bestMean: best.mean, bestCV: stable.cv });
+      setRunMeta("met", { forceRun: isForceRunEnabled(), inputSize: `g=${g}, e=${e}`, standardization: "none", preprocessing: "No truncation; matrix used as entered.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsMET.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
     $("#metERCompute").addEventListener("click", () => {
-      const { g, e, M } = readMatrix();
+      const { g, e, M, errors } = readMatrix();
+      if (shouldBlockForValidation("met-er", errors, "#metKpis")) return;
       const gMeans = M.map((row) => mean(row));
       const eMeans = Array.from({ length: e }, (_, j) => mean(M.map((r) => r[j])));
       const grand = mean(gMeans);
@@ -5465,7 +6045,22 @@
         </div>
       `;
 
-      $("#metTables").innerHTML = `<h4>Table 1. Eberhart-Russell genotype stability parameters</h4>${gTable}<div style="height:10px"></div><h4>Table 2. Environmental indices</h4>${envTable}`;
+      $("#metTables").innerHTML = `<h4>Table 1. Eberhart-Russell genotype stability parameters</h4>${gTable}<div style="height:10px"></div><h4>Table 2. Environmental indices</h4>${envTable}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 3. Assumption checklist (Eberhart-Russell)", [
+        { assumption: "Linear genotype response to environment index", status: "Core model", note: "bi and S^2di rely on linear response assumption." },
+        { assumption: "Sufficient environments", status: "Recommended", note: "At least 3-4 environments for stable estimates." },
+        { assumption: "Independent residuals across environments", status: "Assumed", note: "Dependence can inflate or deflate S^2di." }
+      ])}`;
+      const qItemsER = [
+        { check: "Environment count adequacy", pass: e >= 3, note: `e=${e}` },
+        { check: "bi proximity to 1 (best)", pass: Math.abs(stable.bi - 1) <= 0.25, note: `bi=${stable.bi.toFixed(3)}` },
+        { check: "Low S^2di (best)", pass: stable.s2di <= mean(rows.map((x) => x.s2di)), note: `S^2di=${stable.s2di.toFixed(4)}` },
+      ];
+      if (strictModeShouldBlock("met-er", qItemsER, "#metKpis")) return;
+      $("#metTables").innerHTML = `${qualityScoreHtml(qItemsER)}<div style="height:10px"></div><h4>Table 1. Eberhart-Russell genotype stability parameters</h4>${gTable}<div style="height:10px"></div><h4>Table 2. Environmental indices</h4>${envTable}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 3. Assumption checklist (Eberhart-Russell)", [
+        { assumption: "Linear genotype response to environment index", status: "Core model", note: "bi and S^2di rely on linear response assumption." },
+        { assumption: "Sufficient environments", status: "Recommended", note: "At least 3-4 environments for stable estimates." },
+        { assumption: "Independent residuals across environments", status: "Assumed", note: "Dependence can inflate or deflate S^2di." }
+      ])}`;
 
       const deviationHtml = deviationBanner("met-er", { bestMean: stable.mean, bestCV: stable.s2di }, ["bestMean", "bestCV"]);
       const interpretation =
@@ -5474,6 +6069,7 @@
         `Most stable in this run: ${stable.g} (mean=${stable.mean.toFixed(3)}, bi=${stable.bi.toFixed(3)}, S^2di=${stable.s2di.toFixed(4)}).\n\n` +
         `Interpretation guide: bi>1 indicates responsiveness to favorable environments; bi<1 indicates relative suitability under stressed/unfavorable environments.`;
       setInterpretation("met-er", interpretation, deviationHtml || "", { bestMean: stable.mean, bestCV: stable.s2di });
+      setRunMeta("met-er", { forceRun: isForceRunEnabled(), inputSize: `g=${g}, e=${e}`, standardization: "none", preprocessing: "No truncation; Eberhart-Russell fit on current MET matrix.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsER.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
     $("#metCompute").click();
@@ -6054,6 +6650,7 @@
               <label>Trait names (comma separated)
                 <input type="text" id="faNames" value="Trait1, Trait2, Trait3, Trait4" />
               </label>
+              <label class="pill"><input type="checkbox" id="faStandardize" /> Standardize trait matrix before decomposition</label>
               <button class="action-btn primary2" type="button" id="faBuild">Build matrix</button>
             </div>
             <div id="faWrap" class="matrix" style="margin-top:12px"></div>
@@ -6187,20 +6784,33 @@
       const p = Math.max(2, Math.min(8, Number($("#faP").value || defaultP)));
       const k = Math.max(1, Math.min(4, Number($("#faK").value || defaultK)));
       const names = namesFromInput(p);
+      clearValidation("#faWrap");
+      const errors = [];
 
       const R = Array.from({ length: p }, () => Array(p).fill(0));
       for (let i = 0; i < p; i++) {
         R[i][i] = 1;
         for (let j = i + 1; j < p; j++) {
           const input = document.querySelector(`#faWrap input[data-fa="i${i}j${j}"]`);
-          const v = Number(input?.value ?? 0);
+          const v = Number(input?.value ?? NaN);
+          if (!Number.isFinite(v)) {
+            errors.push(`Factor Analysis: invalid value at Trait${i + 1}, Trait${j + 1}`);
+            markInvalidInput(input, "Enter numeric correlation");
+          } else if (v < -1 || v > 1) {
+            errors.push(`Factor Analysis: out-of-range value at Trait${i + 1}, Trait${j + 1}`);
+            markInvalidInput(input, "Correlation must be between -1 and 1");
+          }
           R[i][j] = Number.isFinite(v) ? v : 0;
           R[j][i] = R[i][j];
         }
       }
+      errors.push(...matrixValidationErrors(R, { minVal: -1, maxVal: 1, requireUnitDiag: true }));
+      if (shouldBlockForValidation("factoranalysis", errors, "#faKpis")) return;
+      const std = !!$("#faStandardize")?.checked;
+      const Ruse = std ? zScoreColumns(R).Z : R;
 
       // eigen decomposition approximation
-      const { vals, vecs } = powerEigenSymmetric(R, p);
+      const { vals, vecs } = powerEigenSymmetric(Ruse, p);
       const eig = vals.map((v, idx) => ({ val: Math.max(0, v), vec: vecs[idx], idx })).sort((a, b) => b.val - a.val);
       const totalVar = eig.reduce((s, x) => s + x.val, 0) || 1e-12;
 
@@ -6250,8 +6860,13 @@
         ["Trait", ...use.map((_, j) => `Loading F${j + 1}`), "Communality (h2)", "Uniqueness (u2)"],
         names.map((nm, i) => [nm, ...loadings[i], communalities[i], uniqueness[i]])
       );
-
-      $("#faTables").innerHTML = `<h4>Table 1. Eigenvalues and explained variance</h4>${tEig}<div style="height:10px"></div><h4>Table 2. Factor loadings and communalities</h4>${tLoad}`;
+      const qItemsFA = [
+        { check: "Trait dimension adequacy", pass: p >= 4, note: `p=${p}` },
+        { check: "Variance capture (retained)", pass: cumK >= 60, note: `Cum=${cumK.toFixed(2)}%` },
+        { check: "Leading factor informativeness", pass: pc1 >= 30, note: `F1=${pc1.toFixed(2)}%` },
+      ];
+      if (strictModeShouldBlock("factoranalysis", qItemsFA, "#faKpis")) return;
+      $("#faTables").innerHTML = `${qualityScoreHtml(qItemsFA)}<div style="height:10px"></div><h4>Table 1. Eigenvalues and explained variance</h4>${tEig}<div style="height:10px"></div><h4>Table 2. Factor loadings and communalities</h4>${tLoad}`;
 
       const deviationHtml = deviationBanner("factoranalysis", { pc1Share: pc1, cumShare: cumK }, ["pc1Share", "cumShare"]);
       const interpretation =
@@ -6260,6 +6875,7 @@
         `A larger loading magnitude indicates stronger association of a trait with the corresponding latent factor.\n` +
         `Higher communality indicates that retained factors explain a larger portion of that trait's variance.`;
       setInterpretation("factoranalysis", interpretation, deviationHtml || "", { pc1Share: pc1, cumShare: cumK });
+      setRunMeta("factoranalysis", { forceRun: isForceRunEnabled(), inputSize: `p=${p}, k=${use.length}`, standardization: std ? "z-score rows/cols" : "none", preprocessing: "Correlation matrix validated (symmetric, diagonal=1).", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsFA.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
     $("#faCompute").click();
@@ -6315,6 +6931,7 @@
                   <input type="number" min="5" max="95" id="d2Cut" value="60" />
                 </label>
               </div>
+              <label class="pill"><input type="checkbox" id="d2Standardize" checked /> Standardize trait columns before D2 clustering</label>
               <button class="action-btn primary2" type="button" id="d2Build">Build trait table</button>
             </div>
             <div id="d2Wrap" class="matrix" style="margin-top:12px"></div>
@@ -6698,6 +7315,21 @@
 
     $("#d2Compute").addEventListener("click", () => {
       const { n, X } = readData();
+      clearValidation("#d2Wrap");
+      const errors = [];
+      for (let i = 0; i < n; i++) {
+        for (let t = 0; t < X[0].length; t++) {
+          const input = document.querySelector(`#d2Wrap input[data-d2="g${i}t${t}"]`);
+          const v = Number(input?.value ?? NaN);
+          if (!Number.isFinite(v)) {
+            errors.push(`D2: invalid value at G${i + 1}, Trait${t + 1}`);
+            markInvalidInput(input, "Enter a valid numeric value");
+          }
+        }
+      }
+      if (shouldBlockForValidation("d2", errors, "#d2Kpis")) return;
+      const std = !!$("#d2Standardize")?.checked;
+      const Xuse = std ? zScoreColumns(X).Z : X;
       const k = Math.max(2, Math.min(12, Number($("#d2K").value || 3)));
       const useK = $("#d2mK").checked;
       const useU = $("#d2mU").checked;
@@ -6706,10 +7338,10 @@
       const methods = [];
       const labelSets = [];
 
-      const D = distanceMatrix(X);
+      const D = distanceMatrix(Xuse);
 
       if (useK) {
-        const lab = kmeans(X, Math.min(k, n));
+        const lab = kmeans(Xuse, Math.min(k, n));
         methods.push("K-means");
         labelSets.push(lab);
       }
@@ -6725,7 +7357,7 @@
         labelSets.push(lab);
       }
       if (useW) {
-        const link = wardLinkage(X);
+        const link = wardLinkage(Xuse);
         const lab = labelsFromLinkage(link, n, Math.min(k, n));
         methods.push("Ward");
         labelSets.push(lab);
@@ -6741,7 +7373,7 @@
       const lineW = Math.max(1, Math.min(5, Number($("#d2LineW").value || 2)));
       const cut = Math.max(5, Math.min(95, Number($("#d2Cut").value || 60)));
 
-      drawSimpleScatterClusters($("#d2ClusterChart"), X, consLab, pointSize);
+      drawSimpleScatterClusters($("#d2ClusterChart"), Xuse, consLab, pointSize);
       drawDendrogram($("#d2DendroChart"), cons.link, n, lineW, cut);
 
       // cluster metrics from consensus labels
@@ -6788,11 +7420,11 @@
         methods.map((m, idx) => [m, new Set(labelSets[idx]).size])
       );
       // Cluster means (trait-wise)
-      const traitCount = X[0].length;
+      const traitCount = Xuse[0].length;
       const clusterMeanRows = [];
       for (const c of cKeys) {
         const members = clusters[c];
-        const means = Array.from({ length: traitCount }, (_, t) => mean(members.map((i) => X[i][t])));
+        const means = Array.from({ length: traitCount }, (_, t) => mean(members.map((i) => Xuse[i][t])));
         clusterMeanRows.push([`Cluster ${c + 1}`, ...means]);
       }
       const tClusterMeans = buildTable(
@@ -6806,7 +7438,7 @@
       for (let i = 0; i < n; i++) {
         for (let j = i + 1; j < n; j++) {
           for (let t = 0; t < traitCount; t++) {
-            const d = X[i][t] - X[j][t];
+            const d = Xuse[i][t] - Xuse[j][t];
             const d2 = d * d;
             contrib[t] += d2;
             totalContrib += d2;
@@ -6832,13 +7464,24 @@
         ["Cross", "P1", "P2", "F1", "Mid-parent heterosis (%)", "Better-parent heterosis (%)"],
         het
       );
+      const qItemsD2 = [
+        { check: "Methods selected", pass: methods.length >= 2, note: `${methods.length} method(s)` },
+        { check: "Cluster separability", pass: bestInter > 0.5, note: `max inter=${bestInter.toFixed(3)}` },
+        { check: "Cluster count adequacy", pass: cKeys.length >= 2, note: `${cKeys.length} consensus cluster(s)` },
+      ];
+      if (strictModeShouldBlock("d2", qItemsD2, "#d2Kpis")) return;
 
       $("#d2Tables").innerHTML =
-        `<h4>Table 1. Method-wise cluster counts</h4>${tMethod}` +
+        `${qualityScoreHtml(qItemsD2)}<div style="height:10px"></div><h4>Table 1. Method-wise cluster counts</h4>${tMethod}` +
         `<div style="height:10px"></div><h4>Table 2. Consensus clustering summary</h4>${tCons}` +
         `<div style="height:10px"></div><h4>Table 3. Cluster means by traits</h4>${tClusterMeans}` +
         `<div style="height:10px"></div><h4>Table 4. Trait-wise percentage contribution to D2</h4>${tContrib}` +
-        `<div style="height:10px"></div><h4>Table 5. Heterosis values</h4>${tHet}`;
+        `<div style="height:10px"></div><h4>Table 5. Heterosis values</h4>${tHet}` +
+        `<div style="height:10px"></div>${assumptionsChecklistHtml("Table 6. Assumption checklist", [
+          { assumption: "Trait scaling compatibility", status: "Recommended", note: "Standardize traits when units differ strongly." },
+          { assumption: "Euclidean distance relevance", status: "Assumed", note: "Alternative metrics may be suitable for specific datasets." },
+          { assumption: "Method agreement", status: "Recommended", note: "Consensus clustering improves robustness over single-method solutions." }
+        ])}`;
 
       const consensusSpread = cKeys.length;
       const deviationHtml = deviationBanner("d2", { bestInterCluster: bestInter, consensusSpread }, ["bestInterCluster", "consensusSpread"]);
@@ -6850,6 +7493,7 @@
         `Heterosis summary: mean MPH=${mphMean.toFixed(2)}%, mean BPH=${bphMean.toFixed(2)}%.\n` +
         `Large inter-cluster distances and positive heterosis in selected inter-cluster crosses support divergence-based hybrid selection.`;
       setInterpretation("d2", interpretation, deviationHtml || "", { bestInterCluster: bestInter, consensusSpread });
+      setRunMeta("d2", { forceRun: isForceRunEnabled(), inputSize: `n=${n}, p=${traitCount}, methods=${methods.length}`, standardization: std ? "z-score columns" : "none", preprocessing: "Trait matrix checked; clustering used selected methods.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsD2.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
   }
 
@@ -7167,6 +7811,180 @@
       { id: "pca", title: "PCA", icon: "◔" },
     ],
   };
+
+  function computeButtonForModule(moduleId) {
+    const map = {
+      crd: "crdCompute",
+      rbd: "rbdCompute",
+      factorial: "factCompute",
+      lattice: "latCompute",
+      augmented: "augCompute",
+      splitplot: "spCompute",
+      correlation: "corCompute",
+      regression: "regCompute",
+      pca: "pcaCompute",
+      path: "pathCompute",
+      discriminant: "dfaCompute",
+      factoranalysis: "faCompute",
+      d2: "d2Compute",
+      metroglyph: "metgCompute",
+      linetester: "ltCompute",
+      diallel: "diallelCompute",
+      nc: "ncCompute",
+      triple: "ttcCompute",
+      genmean: "gmCompute",
+      met: "metCompute",
+      ammi: "ammiCompute",
+    };
+    return map[moduleId] || "";
+  }
+
+  async function runSelectedAnalysesReport(ids) {
+    if (!ids || !ids.length) return;
+    const sections = [];
+    for (const id of ids) {
+      openModule(id);
+      await new Promise((r) => setTimeout(r, 0));
+      const computeId = computeButtonForModule(id);
+      if (computeId) document.getElementById(computeId)?.click();
+      if (CURRENT_BATCH_PRESET) {
+        const prev = LAST_RUN_META[id] || {};
+        setRunMeta(id, { ...prev, batchPreset: CURRENT_BATCH_PRESET });
+      }
+      await new Promise((r) => setTimeout(r, 0));
+      const html = document.querySelector("#contentBody .section")?.innerHTML || "";
+      sections.push(`<h2>${qs(id.toUpperCase())}</h2>${html}`);
+    }
+    const title = "BKQuant_Batch_Report";
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${title}</title></head><body>${sections.join("<hr/>")}</body></html>`;
+    downloadBlob(`${title}.doc`, html, "application/msword");
+    downloadBlob(`${title}.xls`, html, "application/vnd.ms-excel");
+  }
+
+  function showRunSelectorPanel() {
+    const all = Object.values(GROUPS).flat();
+    const presetCoreTrials = ["crd", "rbd", "factorial", "lattice", "augmented", "splitplot", "met", "ammi"];
+    const presetBreedingCore = ["correlation", "regression", "path", "d2", "linetester", "diallel", "nc", "triple", "genmean", "pca"];
+    const checked = new Set(["rbd", "factorial", "met", "d2"]);
+    const html = `
+      <div class="section" style="margin-top:8px;border:1px solid rgba(255,255,255,0.14)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+          <h4 style="margin:0">Run selected analyses</h4>
+          <button class="action-btn" type="button" data-utility="close">Close</button>
+        </div>
+        <div class="muted small" style="margin-top:6px">Select modules to auto-run and combine in one DOC/XLS package.</div>
+        <div class="actions" style="margin-top:10px">
+          <button class="action-btn" type="button" data-batch-preset="all">Select all</button>
+          <button class="action-btn" type="button" data-batch-preset="none">Clear all</button>
+          <button class="action-btn" type="button" data-batch-preset="core-trials">Core trials</button>
+          <button class="action-btn" type="button" data-batch-preset="breeding-core">Breeding core</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:10px">
+          ${all.map((m) => `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-run-module="${qs(m.id)}" ${checked.has(m.id) ? "checked" : ""}/> <span>${qs(m.title)}</span></label>`).join("")}
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button class="action-btn primary2" type="button" id="runSelectedNow">Run and export package</button>
+        </div>
+      </div>
+    `;
+    setUtilityPanelHtml(html);
+    function applyPreset(mode) {
+      CURRENT_BATCH_PRESET = mode;
+      const inputs = Array.from(document.querySelectorAll("[data-run-module]"));
+      const set = new Set(
+        mode === "core-trials" ? presetCoreTrials :
+        mode === "breeding-core" ? presetBreedingCore :
+        mode === "all" ? all.map((m) => m.id) : []
+      );
+      inputs.forEach((el) => {
+        const id = el.getAttribute("data-run-module");
+        el.checked = set.has(id);
+      });
+    }
+    document.querySelectorAll("[data-batch-preset]").forEach((btn) => {
+      btn.addEventListener("click", () => applyPreset(btn.getAttribute("data-batch-preset")));
+    });
+    document.getElementById("runSelectedNow")?.addEventListener("click", async () => {
+      const ids = Array.from(document.querySelectorAll("[data-run-module]:checked")).map((el) => el.getAttribute("data-run-module"));
+      if (!ids.length) {
+        alert("Select at least one module.");
+        return;
+      }
+      await runSelectedAnalysesReport(ids);
+      setUtilityPanelHtml("");
+    });
+  }
+
+  function showProjectManager() {
+    const all = loadProjects();
+    const names = Object.keys(all).sort();
+    if (!names.length) {
+      setUtilityPanelHtml(`<div class="note">No saved projects found.<button class="action-btn" style="margin-left:8px" type="button" data-utility="close">Close</button></div>`);
+      return;
+    }
+    const rows = names.map((name) => {
+      const p = all[name];
+      return `<tr>
+        <td>${qs(name)}</td>
+        <td>${qs(p.moduleId || "")}</td>
+        <td>${qs((p.savedAt || "").replace("T", " ").slice(0, 19))}</td>
+        <td>
+          <button class="action-btn" type="button" data-proj-act="load" data-proj-name="${qs(name)}">Load</button>
+          <button class="action-btn" type="button" data-proj-act="rename" data-proj-name="${qs(name)}">Rename</button>
+          <button class="action-btn" type="button" data-proj-act="delete" data-proj-name="${qs(name)}">Delete</button>
+        </td>
+      </tr>`;
+    }).join("");
+    const html = `
+      <div class="section" style="margin-top:8px;border:1px solid rgba(255,255,255,0.14)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+          <h4 style="margin:0">Saved projects</h4>
+          <button class="action-btn" type="button" data-utility="close">Close</button>
+        </div>
+        <div style="overflow:auto;margin-top:10px">
+          <table class="data">
+            <thead><tr><th>Project</th><th>Module</th><th>Saved at</th><th>Actions</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    setUtilityPanelHtml(html);
+    document.querySelectorAll("[data-proj-act]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const act = btn.getAttribute("data-proj-act");
+        const name = btn.getAttribute("data-proj-name");
+        const projects = loadProjects();
+        if (!projects[name]) return;
+        if (act === "delete") {
+          if (!window.confirm(`Delete project "${name}"?`)) return;
+          delete projects[name];
+          localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+          showProjectManager();
+          return;
+        }
+        if (act === "rename") {
+          const next = (window.prompt("Rename project to:", name) || "").trim();
+          if (!next || next === name) return;
+          projects[next] = projects[name];
+          delete projects[name];
+          localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+          showProjectManager();
+          return;
+        }
+        if (act === "load") {
+          const p = projects[name];
+          openModule(p.moduleId);
+          setTimeout(() => {
+            applyInputState(p.state || {});
+            const computeId = computeButtonForModule(p.moduleId);
+            if (computeId) document.getElementById(computeId)?.click();
+          }, 0);
+          setUtilityPanelHtml("");
+        }
+      });
+    });
+  }
 
   function openModule(id) {
     // highlight current group based on module id
