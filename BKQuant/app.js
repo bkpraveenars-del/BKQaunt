@@ -5406,6 +5406,1241 @@
     $("#ammiCompute").click();
   }
 
+  // --- Discriminant Function Analysis ---
+  function renderDiscriminant() {
+    const title = "Discriminant Function Analysis (Calculator)";
+    showContentHeader({
+      title,
+      subtitle: "Input two-group trait data, compute linear discriminant scores, classify samples, and report accuracy.",
+    });
+
+    const defaultN = 8;
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Input</div><div class="value">Two-group, two-trait data</div></div>
+        <div class="kpi"><div class="label">Output</div><div class="value">LD score, class prediction, accuracy</div></div>
+        <div class="kpi"><div class="label">Plot</div><div class="value">LD1 group separation</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Grouped input data</h4>
+            <div class="input-grid">
+              <label>Rows per group
+                <input type="number" min="4" max="40" id="dfaN" value="${defaultN}" />
+              </label>
+              <button class="action-btn primary2" type="button" id="dfaBuild">Build grouped table</button>
+              <div class="note" style="margin:0">
+                Groups: A and B. Traits: X1 and X2. Edit values then compute.
+              </div>
+            </div>
+            <div id="dfaWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="dfaCompute">Compute Discriminant Function</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="dfaKpis"></div>
+            <div class="chart" style="height:260px;margin-top:12px"><canvas id="dfaChart" style="width:100%;height:100%"></canvas></div>
+            <div id="dfaTables" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "discriminant",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["acc", "ldSeparation"],
+    });
+
+    function build(n) {
+      const wrap = $("#dfaWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      table.innerHTML = `<thead><tr><th>Sample</th><th>Group</th><th>X1</th><th>X2</th></tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < n; i++) {
+        const x1 = 12 + i * 0.8 + (i % 2 ? 0.9 : 0.1);
+        const x2 = 8 + i * 0.55 + (i % 3 ? 0.4 : 0.05);
+        rows.push(`<tr>
+          <th>A${i + 1}</th><td>A</td>
+          <td><input type="number" step="0.01" value="${x1.toFixed(2)}" data-dfa="A${i}-x1"/></td>
+          <td><input type="number" step="0.01" value="${x2.toFixed(2)}" data-dfa="A${i}-x2"/></td>
+        </tr>`);
+      }
+      for (let i = 0; i < n; i++) {
+        const x1 = 17 + i * 0.7 + (i % 2 ? 0.4 : 1.0);
+        const x2 = 11 + i * 0.5 + (i % 3 ? 0.2 : 0.8);
+        rows.push(`<tr>
+          <th>B${i + 1}</th><td>B</td>
+          <td><input type="number" step="0.01" value="${x1.toFixed(2)}" data-dfa="B${i}-x1"/></td>
+          <td><input type="number" step="0.01" value="${x2.toFixed(2)}" data-dfa="B${i}-x2"/></td>
+        </tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    function invert2x2(a, b, c, d) {
+      const det = a * d - b * c;
+      if (Math.abs(det) < 1e-12) return null;
+      return [d / det, -b / det, -c / det, a / det];
+    }
+
+    function drawLDSeparation(canvas, scoredA, scoredB) {
+      // Plot LD1 as x-axis and group lane as y jitter
+      const points = [
+        ...scoredA.map((x, i) => ({ x, y: 0.9 + (i % 3) * 0.05, label: `A${i + 1}` })),
+        ...scoredB.map((x, i) => ({ x, y: 1.8 + (i % 3) * 0.05, label: `B${i + 1}` })),
+      ];
+      drawScatterPlot(canvas, points, { title: "Discriminant score separation (LD1)", xLabel: "LD1 score", yLabel: "Group lane" });
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(280, Math.floor(rect.width));
+      const h = Math.max(180, Math.floor(rect.height));
+      const pad = 42;
+      const xs = points.map((p) => p.x);
+      const ys = points.map((p) => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      points.forEach((p) => {
+        const px = pad + ((p.x - minX) / rx) * (w - pad * 1.2);
+        const py = pad + (h - pad * 1.5) - ((p.y - minY) / ry) * (h - pad * 1.5);
+        ctx.fillStyle = p.label.startsWith("A") ? "rgba(82,255,202,0.9)" : "rgba(255,209,102,0.9)";
+        ctx.beginPath();
+        ctx.arc(px, py, 4.8, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    build(defaultN);
+    $("#dfaBuild").addEventListener("click", () => {
+      const n = Math.max(4, Math.min(40, Number($("#dfaN").value || defaultN)));
+      build(n);
+    });
+
+    $("#dfaCompute").addEventListener("click", () => {
+      const n = Math.max(4, Math.min(40, Number($("#dfaN").value || defaultN)));
+      const A = [];
+      const B = [];
+      for (let i = 0; i < n; i++) {
+        const ax1 = Number(document.querySelector(`#dfaWrap input[data-dfa="A${i}-x1"]`)?.value ?? 0);
+        const ax2 = Number(document.querySelector(`#dfaWrap input[data-dfa="A${i}-x2"]`)?.value ?? 0);
+        const bx1 = Number(document.querySelector(`#dfaWrap input[data-dfa="B${i}-x1"]`)?.value ?? 0);
+        const bx2 = Number(document.querySelector(`#dfaWrap input[data-dfa="B${i}-x2"]`)?.value ?? 0);
+        A.push([ax1, ax2]);
+        B.push([bx1, bx2]);
+      }
+
+      const meanA = [mean(A.map((r) => r[0])), mean(A.map((r) => r[1]))];
+      const meanB = [mean(B.map((r) => r[0])), mean(B.map((r) => r[1]))];
+      const dMean = [meanB[0] - meanA[0], meanB[1] - meanA[1]];
+
+      // pooled within covariance (2x2)
+      function cov2(rows, means) {
+        let s11 = 0, s22 = 0, s12 = 0;
+        for (const r of rows) {
+          const x = r[0] - means[0];
+          const y = r[1] - means[1];
+          s11 += x * x;
+          s22 += y * y;
+          s12 += x * y;
+        }
+        const den = Math.max(1, rows.length - 1);
+        return [s11 / den, s12 / den, s12 / den, s22 / den];
+      }
+      const SA = cov2(A, meanA);
+      const SB = cov2(B, meanB);
+      const n1 = A.length, n2 = B.length;
+      const SW = [
+        ((n1 - 1) * SA[0] + (n2 - 1) * SB[0]) / Math.max(1, n1 + n2 - 2),
+        ((n1 - 1) * SA[1] + (n2 - 1) * SB[1]) / Math.max(1, n1 + n2 - 2),
+        ((n1 - 1) * SA[2] + (n2 - 1) * SB[2]) / Math.max(1, n1 + n2 - 2),
+        ((n1 - 1) * SA[3] + (n2 - 1) * SB[3]) / Math.max(1, n1 + n2 - 2),
+      ];
+      const inv = invert2x2(SW[0], SW[1], SW[2], SW[3]);
+      if (!inv) {
+        $("#dfaKpis").innerHTML = `<div class="note">Pooled covariance is singular. Adjust data (remove collinearity) and recompute.</div>`;
+        $("#dfaTables").innerHTML = "";
+        return;
+      }
+
+      // Fisher linear discriminant vector w = SW^-1 (meanB - meanA)
+      const w = [
+        inv[0] * dMean[0] + inv[1] * dMean[1],
+        inv[2] * dMean[0] + inv[3] * dMean[1],
+      ];
+      const score = (row) => w[0] * row[0] + w[1] * row[1];
+      const scoreA = A.map(score);
+      const scoreB = B.map(score);
+      const cA = mean(scoreA);
+      const cB = mean(scoreB);
+      const threshold = (cA + cB) / 2;
+
+      // classify
+      const predA = scoreA.map((s) => (s >= threshold ? "B" : "A"));
+      const predB = scoreB.map((s) => (s >= threshold ? "B" : "A"));
+      const correctA = predA.filter((p) => p === "A").length;
+      const correctB = predB.filter((p) => p === "B").length;
+      const acc = ((correctA + correctB) / (n1 + n2)) * 100;
+      const ldSep = Math.abs(cB - cA);
+
+      $("#dfaKpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">w1</div><div class="value">${w[0].toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">w2</div><div class="value">${w[1].toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Centroid gap |cB-cA|</div><div class="value">${ldSep.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Threshold</div><div class="value">${threshold.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Training accuracy</div><div class="value">${acc.toFixed(2)}%</div></div>
+        </div>
+      `;
+
+      drawLDSeparation($("#dfaChart"), scoreA, scoreB);
+
+      const t1 = buildTable(
+        ["Sample", "True group", "LD score", "Predicted group", "Correct?"],
+        [
+          ...scoreA.map((s, i) => [`A${i + 1}`, "A", s, predA[i], predA[i] === "A" ? "Yes" : "No"]),
+          ...scoreB.map((s, i) => [`B${i + 1}`, "B", s, predB[i], predB[i] === "B" ? "Yes" : "No"]),
+        ]
+      );
+      const t2 = buildTable(
+        ["Parameter", "Estimate"],
+        [
+          ["Group A centroid (LD1)", cA],
+          ["Group B centroid (LD1)", cB],
+          ["Threshold", threshold],
+          ["Centroid separation |cB-cA|", ldSep],
+          ["Accuracy (%)", acc],
+        ]
+      );
+      $("#dfaTables").innerHTML = `<h4>Table 1. Sample-wise discriminant classification</h4>${t1}<div style="height:10px"></div><h4>Table 2. Discriminant model summary</h4>${t2}`;
+
+      const deviationHtml = deviationBanner("discriminant", { acc, ldSeparation: ldSep }, ["acc", "ldSeparation"]);
+      const interpretation =
+        `Discriminant analysis constructs a linear function D = w1*X1 + w2*X2 to separate predefined groups.\n\n` +
+        `Model summary:\n` +
+        `• D coefficients: w1=${w[0].toFixed(4)}, w2=${w[1].toFixed(4)}\n` +
+        `• Group centroids: A=${cA.toFixed(4)}, B=${cB.toFixed(4)}\n` +
+        `• Separation gap=${ldSep.toFixed(4)}, accuracy=${acc.toFixed(2)}%\n\n` +
+        `Higher centroid separation and accuracy indicate stronger discriminatory power of the selected traits.`;
+      setInterpretation("discriminant", interpretation, deviationHtml || "", { acc, ldSeparation: ldSep });
+    });
+
+    $("#dfaCompute").click();
+  }
+
+  // --- Factor Analysis ---
+  function renderFactorAnalysis() {
+    const title = "Factor Analysis (Calculator)";
+    showContentHeader({
+      title,
+      subtitle: "Input trait correlation matrix, estimate factor loadings, communalities, and explained variance with scree plot.",
+    });
+
+    const defaultP = 4;
+    const defaultK = 2;
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Input</div><div class="value">Trait correlation matrix</div></div>
+        <div class="kpi"><div class="label">Output</div><div class="value">Loadings, communalities, variance</div></div>
+        <div class="kpi"><div class="label">Plot</div><div class="value">Scree plot</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Correlation matrix input</h4>
+            <div class="input-grid">
+              <div class="two-col">
+                <label>Number of traits (p)
+                  <input type="number" min="2" max="8" id="faP" value="${defaultP}" />
+                </label>
+                <label>Factors to retain (k)
+                  <input type="number" min="1" max="4" id="faK" value="${defaultK}" />
+                </label>
+              </div>
+              <label>Trait names (comma separated)
+                <input type="text" id="faNames" value="Trait1, Trait2, Trait3, Trait4" />
+              </label>
+              <button class="action-btn primary2" type="button" id="faBuild">Build matrix</button>
+            </div>
+            <div id="faWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="faCompute">Compute Factor Analysis</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="faKpis"></div>
+            <div class="chart" style="height:260px;margin-top:12px"><canvas id="faChart" style="width:100%;height:100%"></canvas></div>
+            <div id="faTables" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "factoranalysis",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["pc1Share", "cumShare"],
+    });
+
+    function namesFromInput(p) {
+      const raw = ($("#faNames").value || "").split(",").map((s) => s.trim()).filter(Boolean);
+      const out = [];
+      for (let i = 0; i < p; i++) out.push(raw[i] || `Trait${i + 1}`);
+      $("#faNames").value = out.join(", ");
+      return out;
+    }
+
+    function build(p) {
+      const names = namesFromInput(p);
+      const wrap = $("#faWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Trait", ...names];
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < p; i++) {
+        const cells = [];
+        for (let j = 0; j < p; j++) {
+          if (i === j) {
+            cells.push(`<td><input type="number" step="0.01" value="1" readonly data-fa="i${i}j${j}" /></td>`);
+          } else if (j < i) {
+            cells.push(`<td class="muted small" style="font-weight:900">-</td>`);
+          } else {
+            const v = Math.max(0.05, Math.min(0.95, 0.15 + (i + 1) * 0.12 + (j + 1) * 0.07));
+            cells.push(`<td><input type="number" step="0.01" min="-0.99" max="0.99" value="${v.toFixed(2)}" data-fa="i${i}j${j}" /></td>`);
+          }
+        }
+        rows.push(`<tr><th>${qs(names[i])}</th>${cells.join("")}</tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    function powerEigenSymmetric(A, nComp = 2) {
+      // simple deflation-based power iteration for symmetric matrix
+      const n = A.length;
+      let B = A.map((r) => r.slice());
+      const vals = [];
+      const vecs = [];
+      for (let c = 0; c < Math.min(nComp, n); c++) {
+        let v = Array.from({ length: n }, (_, i) => (i === c ? 1 : 0.5 / n));
+        for (let it = 0; it < 90; it++) {
+          const Bv = matVecMul(B, v);
+          const norm = Math.sqrt(Bv.reduce((s, x) => s + x * x, 0)) || 1;
+          v = Bv.map((x) => x / norm);
+        }
+        const Bv = matVecMul(B, v);
+        const lambda = v.reduce((s, x, i) => s + x * Bv[i], 0);
+        vals.push(lambda);
+        vecs.push(v.slice());
+        // deflation: B = B - lambda * v v'
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            B[i][j] -= lambda * v[i] * v[j];
+          }
+        }
+      }
+      return { vals, vecs };
+    }
+
+    build(defaultP);
+    $("#faBuild").addEventListener("click", () => {
+      const p = Math.max(2, Math.min(8, Number($("#faP").value || defaultP)));
+      build(p);
+    });
+
+    $("#faCompute").addEventListener("click", () => {
+      const p = Math.max(2, Math.min(8, Number($("#faP").value || defaultP)));
+      const k = Math.max(1, Math.min(4, Number($("#faK").value || defaultK)));
+      const names = namesFromInput(p);
+
+      const R = Array.from({ length: p }, () => Array(p).fill(0));
+      for (let i = 0; i < p; i++) {
+        R[i][i] = 1;
+        for (let j = i + 1; j < p; j++) {
+          const input = document.querySelector(`#faWrap input[data-fa="i${i}j${j}"]`);
+          const v = Number(input?.value ?? 0);
+          R[i][j] = Number.isFinite(v) ? v : 0;
+          R[j][i] = R[i][j];
+        }
+      }
+
+      // eigen decomposition approximation
+      const { vals, vecs } = powerEigenSymmetric(R, p);
+      const eig = vals.map((v, idx) => ({ val: Math.max(0, v), vec: vecs[idx], idx })).sort((a, b) => b.val - a.val);
+      const totalVar = eig.reduce((s, x) => s + x.val, 0) || 1e-12;
+
+      // loadings: l_ij = sqrt(lambda_j) * e_ij
+      const use = eig.slice(0, Math.min(k, eig.length));
+      const loadings = Array.from({ length: p }, () => Array(use.length).fill(0));
+      for (let j = 0; j < use.length; j++) {
+        const s = Math.sqrt(Math.max(0, use[j].val));
+        for (let i = 0; i < p; i++) loadings[i][j] = use[j].vec[i] * s;
+      }
+      const communalities = loadings.map((row) => row.reduce((a, b) => a + b * b, 0));
+      const uniqueness = communalities.map((h2) => Math.max(0, 1 - h2));
+
+      const explained = eig.map((x) => (x.val / totalVar) * 100);
+      const cum = [];
+      let acc = 0;
+      for (const e of explained) {
+        acc += e;
+        cum.push(acc);
+      }
+
+      const pc1 = explained[0] || 0;
+      const cumK = cum[Math.min(use.length - 1, cum.length - 1)] || 0;
+
+      $("#faKpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">Traits</div><div class="value">${p}</div></div>
+          <div class="kpi"><div class="label">Retained factors</div><div class="value">${use.length}</div></div>
+          <div class="kpi"><div class="label">Factor1 variance</div><div class="value">${pc1.toFixed(2)}%</div></div>
+          <div class="kpi"><div class="label">Cumulative (k)</div><div class="value">${cumK.toFixed(2)}%</div></div>
+          <div class="kpi"><div class="label">Top eigenvalue</div><div class="value">${(eig[0]?.val || 0).toFixed(4)}</div></div>
+        </div>
+      `;
+
+      drawBarChart(
+        $("#faChart"),
+        eig.map((_, i) => `F${i + 1}`),
+        eig.map((x) => x.val),
+        { title: "Scree plot (eigenvalues)" }
+      );
+
+      const tEig = buildTable(
+        ["Factor", "Eigenvalue", "Explained variance (%)", "Cumulative (%)"],
+        eig.map((x, i) => [`F${i + 1}`, x.val, explained[i], cum[i]])
+      );
+      const tLoad = buildTable(
+        ["Trait", ...use.map((_, j) => `Loading F${j + 1}`), "Communality (h2)", "Uniqueness (u2)"],
+        names.map((nm, i) => [nm, ...loadings[i], communalities[i], uniqueness[i]])
+      );
+
+      $("#faTables").innerHTML = `<h4>Table 1. Eigenvalues and explained variance</h4>${tEig}<div style="height:10px"></div><h4>Table 2. Factor loadings and communalities</h4>${tLoad}`;
+
+      const deviationHtml = deviationBanner("factoranalysis", { pc1Share: pc1, cumShare: cumK }, ["pc1Share", "cumShare"]);
+      const interpretation =
+        `Factor analysis summarizes correlated traits into latent factors.\n\n` +
+        `Retained factors: ${use.length}; cumulative explained variance: ${cumK.toFixed(2)}%.\n` +
+        `A larger loading magnitude indicates stronger association of a trait with the corresponding latent factor.\n` +
+        `Higher communality indicates that retained factors explain a larger portion of that trait's variance.`;
+      setInterpretation("factoranalysis", interpretation, deviationHtml || "", { pc1Share: pc1, cumShare: cumK });
+    });
+
+    $("#faCompute").click();
+  }
+
+  // --- D2 Analysis with multiple clustering methods ---
+  function renderD2Analysis() {
+    const title = "D2 Analysis and Cluster Diagrams";
+    showContentHeader({
+      title,
+      subtitle: "Multiple clustering methods (K-means, UPGMA, Tocher, Ward), consensus dendrogram, and heterosis outputs.",
+    });
+
+    const defaultN = 10;
+    const defaultT = 4;
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Clustering methods</div><div class="value">K-means, UPGMA, Tocher, Ward</div></div>
+        <div class="kpi"><div class="label">Combined output</div><div class="value">Consensus dendrogram</div></div>
+        <div class="kpi"><div class="label">Extra output</div><div class="value">Mid-parent and better-parent heterosis</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>D2 matrix input</h4>
+            <div class="input-grid">
+              <div class="two-col">
+                <label>Genotypes (n)<input type="number" min="5" max="40" id="d2N" value="${defaultN}" /></label>
+                <label>Traits (p)<input type="number" min="2" max="10" id="d2T" value="${defaultT}" /></label>
+              </div>
+              <label>Methods
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+                  <label class="pill"><input type="checkbox" id="d2mK" checked /> K-means</label>
+                  <label class="pill"><input type="checkbox" id="d2mU" checked /> UPGMA</label>
+                  <label class="pill"><input type="checkbox" id="d2mT" checked /> Tocher</label>
+                  <label class="pill"><input type="checkbox" id="d2mW" checked /> Ward</label>
+                </div>
+              </label>
+              <div class="two-col">
+                <label>Target clusters (for K-means / cut)
+                  <input type="number" min="2" max="12" id="d2K" value="3" />
+                </label>
+                <label>Dendrogram line width
+                  <input type="number" min="1" max="5" step="0.5" id="d2LineW" value="2" />
+                </label>
+              </div>
+              <div class="two-col">
+                <label>Point size
+                  <input type="number" min="2" max="10" id="d2Point" value="5" />
+                </label>
+                <label>Consensus cut height (%)
+                  <input type="number" min="5" max="95" id="d2Cut" value="60" />
+                </label>
+              </div>
+              <button class="action-btn primary2" type="button" id="d2Build">Build trait table</button>
+            </div>
+            <div id="d2Wrap" class="matrix" style="margin-top:12px"></div>
+            <div class="section" style="margin-top:12px">
+              <h4>Heterosis input (optional)</h4>
+              <div class="muted small">Provide parent and F1 means for selected crosses.</div>
+              <div id="d2HetWrap" class="matrix" style="margin-top:8px"></div>
+            </div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="d2Compute">Compute D2 and clustering</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="d2Kpis"></div>
+            <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2ClusterChart" style="width:100%;height:100%"></canvas></div>
+            <div class="chart" style="height:300px;margin-top:12px"><canvas id="d2DendroChart" style="width:100%;height:100%"></canvas></div>
+            <div id="d2Tables" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "d2",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["bestInterCluster", "consensusSpread"],
+    });
+
+    function build(n, p) {
+      const wrap = $("#d2Wrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Genotype", ...Array.from({ length: p }, (_, j) => `Trait${j + 1}`)];
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < n; i++) {
+        const cells = [];
+        for (let j = 0; j < p; j++) {
+          const v = 10 + i * 0.9 + j * 1.1 + ((i * (j + 1)) % 5) * 0.4;
+          cells.push(`<td><input type="number" step="0.01" value="${v.toFixed(2)}" data-d2="g${i}t${j}" /></td>`);
+        }
+        rows.push(`<tr><th>G${i + 1}</th>${cells.join("")}</tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+
+      const het = $("#d2HetWrap");
+      const ht = document.createElement("table");
+      ht.className = "data";
+      ht.innerHTML = `<thead><tr><th>Cross</th><th>Parent 1 mean</th><th>Parent 2 mean</th><th>F1 mean</th></tr></thead>`;
+      const hRows = [];
+      for (let i = 0; i < Math.min(8, n - 1); i++) {
+        const p1 = 20 + i * 0.8;
+        const p2 = 22 + i * 0.6;
+        const f1 = 24 + i * 0.9;
+        hRows.push(`<tr>
+          <th>G${i + 1} x G${i + 2}</th>
+          <td><input type="number" step="0.01" value="${p1.toFixed(2)}" data-het="r${i}p1"/></td>
+          <td><input type="number" step="0.01" value="${p2.toFixed(2)}" data-het="r${i}p2"/></td>
+          <td><input type="number" step="0.01" value="${f1.toFixed(2)}" data-het="r${i}f1"/></td>
+        </tr>`);
+      }
+      ht.insertAdjacentHTML("beforeend", `<tbody>${hRows.join("")}</tbody>`);
+      het.innerHTML = "";
+      het.appendChild(ht);
+    }
+
+    function readData() {
+      const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
+      const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
+      const X = Array.from({ length: n }, () => Array(p).fill(0));
+      for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
+        const v = Number(document.querySelector(`#d2Wrap input[data-d2="g${i}t${j}"]`)?.value ?? 0);
+        X[i][j] = Number.isFinite(v) ? v : 0;
+      }
+      return { n, p, X };
+    }
+
+    function sqDist(a, b) {
+      let s = 0;
+      for (let i = 0; i < a.length; i++) {
+        const d = a[i] - b[i];
+        s += d * d;
+      }
+      return s;
+    }
+
+    function distanceMatrix(X) {
+      const n = X.length;
+      const D = Array.from({ length: n }, () => Array(n).fill(0));
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        const d = Math.sqrt(sqDist(X[i], X[j]));
+        D[i][j] = d; D[j][i] = d;
+      }
+      return D;
+    }
+
+    function kmeans(X, k, iters = 40) {
+      const n = X.length, p = X[0].length;
+      const centers = Array.from({ length: k }, (_, c) => X[Math.floor((c * n) / k)].slice());
+      let lab = Array(n).fill(0);
+      for (let it = 0; it < iters; it++) {
+        // assign
+        for (let i = 0; i < n; i++) {
+          let best = 0, bd = Infinity;
+          for (let c = 0; c < k; c++) {
+            const d = sqDist(X[i], centers[c]);
+            if (d < bd) { bd = d; best = c; }
+          }
+          lab[i] = best;
+        }
+        // update
+        const sums = Array.from({ length: k }, () => Array(p).fill(0));
+        const cnt = Array(k).fill(0);
+        for (let i = 0; i < n; i++) {
+          cnt[lab[i]]++;
+          for (let j = 0; j < p; j++) sums[lab[i]][j] += X[i][j];
+        }
+        for (let c = 0; c < k; c++) {
+          if (!cnt[c]) continue;
+          for (let j = 0; j < p; j++) centers[c][j] = sums[c][j] / cnt[c];
+        }
+      }
+      return lab;
+    }
+
+    function upgmaLinkage(D) {
+      const n = D.length;
+      let clusters = Array.from({ length: n }, (_, i) => ({ id: i, items: [i] }));
+      let nextId = n;
+      const linkage = [];
+      while (clusters.length > 1) {
+        let bi = 0, bj = 1, bd = Infinity;
+        for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) {
+          let s = 0, c = 0;
+          for (const a of clusters[i].items) for (const b of clusters[j].items) { s += D[a][b]; c++; }
+          const d = s / Math.max(1, c);
+          if (d < bd) { bd = d; bi = i; bj = j; }
+        }
+        const A = clusters[bi], B = clusters[bj];
+        const merged = { id: nextId++, items: [...A.items, ...B.items] };
+        linkage.push([A.id, B.id, bd, merged.items.length]);
+        clusters = clusters.filter((_, idx) => idx !== bi && idx !== bj);
+        clusters.push(merged);
+      }
+      return linkage;
+    }
+
+    function wardLinkage(X) {
+      let clusters = X.map((x, i) => ({ id: i, items: [i], mean: x.slice() }));
+      let nextId = X.length;
+      const p = X[0].length;
+      const linkage = [];
+      function sseMerge(A, B) {
+        const nA = A.items.length, nB = B.items.length;
+        const m = Array(p).fill(0);
+        for (let j = 0; j < p; j++) m[j] = (nA * A.mean[j] + nB * B.mean[j]) / (nA + nB);
+        let s = 0;
+        for (const i of A.items) s += sqDist(X[i], m);
+        for (const i of B.items) s += sqDist(X[i], m);
+        return { s, mean: m };
+      }
+      while (clusters.length > 1) {
+        let bi = 0, bj = 1, bs = Infinity, bm = null;
+        for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) {
+          const m = sseMerge(clusters[i], clusters[j]);
+          if (m.s < bs) { bs = m.s; bi = i; bj = j; bm = m.mean; }
+        }
+        const A = clusters[bi], B = clusters[bj];
+        const merged = { id: nextId++, items: [...A.items, ...B.items], mean: bm };
+        linkage.push([A.id, B.id, Math.sqrt(Math.max(0, bs)), merged.items.length]);
+        clusters = clusters.filter((_, idx) => idx !== bi && idx !== bj);
+        clusters.push(merged);
+      }
+      return linkage;
+    }
+
+    function tocher(D) {
+      const n = D.length;
+      const unassigned = new Set(Array.from({ length: n }, (_, i) => i));
+      const clusters = [];
+      while (unassigned.size) {
+        const first = [...unassigned][0];
+        unassigned.delete(first);
+        const C = [first];
+        // threshold = average distance from first to all others
+        const rest = [...unassigned];
+        const thr = rest.length ? rest.reduce((s, j) => s + D[first][j], 0) / rest.length : 0;
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const cand of [...unassigned]) {
+            const avgToC = C.reduce((s, i) => s + D[i][cand], 0) / C.length;
+            if (avgToC <= thr) {
+              C.push(cand);
+              unassigned.delete(cand);
+              changed = true;
+            }
+          }
+        }
+        clusters.push(C);
+      }
+      const labels = Array(n).fill(0);
+      clusters.forEach((c, idx) => c.forEach((i) => (labels[i] = idx)));
+      return labels;
+    }
+
+    function labelsFromLinkage(linkage, n, k) {
+      // cut linkage to k clusters
+      const parent = Array.from({ length: 2 * n + linkage.length + 5 }, (_, i) => i);
+      const sets = Array.from({ length: 2 * n + linkage.length + 5 }, () => new Set());
+      for (let i = 0; i < n; i++) sets[i].add(i);
+      let cid = n;
+      for (const [a, b] of linkage) {
+        const sa = sets[a], sb = sets[b];
+        sets[cid] = new Set([...sa, ...sb]);
+        cid++;
+      }
+      // choose first (n-k) merges
+      const mergedSets = Array.from({ length: n }, (_, i) => new Set([i]));
+      for (let step = 0; step < Math.max(0, n - k); step++) {
+        const [a, b] = linkage[step];
+        const ia = mergedSets.findIndex((s) => s.has([...sets[a]][0]));
+        const ib = mergedSets.findIndex((s) => s.has([...sets[b]][0]));
+        if (ia >= 0 && ib >= 0 && ia !== ib) {
+          mergedSets[ia] = new Set([...mergedSets[ia], ...mergedSets[ib]]);
+          mergedSets.splice(ib, 1);
+        }
+      }
+      const labels = Array(n).fill(0);
+      mergedSets.forEach((s, idx) => s.forEach((i) => (labels[i] = idx)));
+      return labels;
+    }
+
+    function consensusLabels(labelSets) {
+      const n = labelSets[0].length;
+      // similarity matrix by co-assignment frequency
+      const S = Array.from({ length: n }, () => Array(n).fill(0));
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        let c = 0;
+        for (const lab of labelSets) if (lab[i] === lab[j]) c++;
+        S[i][j] = c / labelSets.length;
+      }
+      // Ward on (1-S) as distance-like
+      const X = S.map((row) => row.map((v) => 1 - v));
+      const link = wardLinkage(X);
+      return { S, link };
+    }
+
+    function drawSimpleScatterClusters(canvas, X, labels, pointSize) {
+      // use first two traits as axes
+      const points = X.map((r, i) => ({ x: r[0], y: r[1] ?? 0, c: labels[i], name: `G${i + 1}` }));
+      drawScatterPlot(canvas, points, { title: "Cluster scatter (Trait1 vs Trait2)", xLabel: "Trait1", yLabel: "Trait2" });
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(280, Math.floor(rect.width));
+      const h = Math.max(180, Math.floor(rect.height));
+      const pad = 42;
+      const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
+      const colors = ["#52ffca", "#ffd166", "#7aa2ff", "#ff5c7a", "#9bff66", "#f7a8ff", "#a8ecff"];
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (const p of points) {
+        const px = pad + ((p.x - minX) / rx) * (w - pad * 1.2);
+        const py = pad + (h - pad * 1.5) - ((p.y - minY) / ry) * (h - pad * 1.5);
+        ctx.fillStyle = colors[p.c % colors.length];
+        ctx.beginPath();
+        ctx.arc(px, py, pointSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawDendrogram(canvas, linkage, n, lineW = 2, cutPct = 60) {
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(220, Math.floor(rect.height));
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const xPos = {};
+      const yPos = {};
+      const padL = 24, padR = 16, padT = 16, padB = 24;
+      for (let i = 0; i < n; i++) {
+        xPos[i] = padL + i * ((w - padL - padR) / Math.max(1, n - 1));
+        yPos[i] = h - padB;
+      }
+      const maxH = Math.max(1e-9, ...linkage.map((l) => l[2]));
+      let cid = n;
+      ctx.strokeStyle = "rgba(234,241,255,0.9)";
+      ctx.lineWidth = lineW;
+      for (const [a, b, dist] of linkage) {
+        const xa = xPos[a], xb = xPos[b];
+        const ya = yPos[a], yb = yPos[b];
+        const ym = h - padB - (dist / maxH) * (h - padT - padB);
+        ctx.beginPath();
+        ctx.moveTo(xa, ya); ctx.lineTo(xa, ym);
+        ctx.moveTo(xb, yb); ctx.lineTo(xb, ym);
+        ctx.moveTo(Math.min(xa, xb), ym); ctx.lineTo(Math.max(xa, xb), ym);
+        ctx.stroke();
+        xPos[cid] = (xa + xb) / 2;
+        yPos[cid] = ym;
+        cid++;
+      }
+      // cut line
+      const yCut = h - padB - (Math.max(5, Math.min(95, cutPct)) / 100) * (h - padT - padB);
+      ctx.strokeStyle = "rgba(255,92,122,0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(padL, yCut); ctx.lineTo(w - padR, yCut); ctx.stroke();
+    }
+
+    function heterosisRows() {
+      const rows = [];
+      const all = $$("#d2HetWrap input[data-het]");
+      const nRows = Math.floor(all.length / 3);
+      for (let i = 0; i < nRows; i++) {
+        const p1 = Number(document.querySelector(`#d2HetWrap input[data-het="r${i}p1"]`)?.value ?? NaN);
+        const p2 = Number(document.querySelector(`#d2HetWrap input[data-het="r${i}p2"]`)?.value ?? NaN);
+        const f1 = Number(document.querySelector(`#d2HetWrap input[data-het="r${i}f1"]`)?.value ?? NaN);
+        if (!Number.isFinite(p1) || !Number.isFinite(p2) || !Number.isFinite(f1)) continue;
+        const mp = (p1 + p2) / 2;
+        const bp = Math.max(p1, p2);
+        const mph = mp === 0 ? 0 : ((f1 - mp) / mp) * 100;
+        const bph = bp === 0 ? 0 : ((f1 - bp) / bp) * 100;
+        rows.push([`G${i + 1}xG${i + 2}`, p1, p2, f1, mph, bph]);
+      }
+      return rows;
+    }
+
+    build(defaultN, defaultT);
+    $("#d2Build").addEventListener("click", () => {
+      const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
+      const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
+      build(n, p);
+    });
+
+    $("#d2Compute").addEventListener("click", () => {
+      const { n, X } = readData();
+      const k = Math.max(2, Math.min(12, Number($("#d2K").value || 3)));
+      const useK = $("#d2mK").checked;
+      const useU = $("#d2mU").checked;
+      const useT = $("#d2mT").checked;
+      const useW = $("#d2mW").checked;
+      const methods = [];
+      const labelSets = [];
+
+      const D = distanceMatrix(X);
+
+      if (useK) {
+        const lab = kmeans(X, Math.min(k, n));
+        methods.push("K-means");
+        labelSets.push(lab);
+      }
+      if (useU) {
+        const link = upgmaLinkage(D);
+        const lab = labelsFromLinkage(link, n, Math.min(k, n));
+        methods.push("UPGMA");
+        labelSets.push(lab);
+      }
+      if (useT) {
+        const lab = tocher(D);
+        methods.push("Tocher");
+        labelSets.push(lab);
+      }
+      if (useW) {
+        const link = wardLinkage(X);
+        const lab = labelsFromLinkage(link, n, Math.min(k, n));
+        methods.push("Ward");
+        labelSets.push(lab);
+      }
+      if (!labelSets.length) {
+        $("#d2Kpis").innerHTML = `<div class="note">Select at least one clustering method.</div>`;
+        return;
+      }
+
+      const cons = consensusLabels(labelSets);
+      const consLab = labelsFromLinkage(cons.link, n, Math.min(k, n));
+      const pointSize = Math.max(2, Math.min(10, Number($("#d2Point").value || 5)));
+      const lineW = Math.max(1, Math.min(5, Number($("#d2LineW").value || 2)));
+      const cut = Math.max(5, Math.min(95, Number($("#d2Cut").value || 60)));
+
+      drawSimpleScatterClusters($("#d2ClusterChart"), X, consLab, pointSize);
+      drawDendrogram($("#d2DendroChart"), cons.link, n, lineW, cut);
+
+      // cluster metrics from consensus labels
+      const clusters = {};
+      for (let i = 0; i < n; i++) {
+        const c = consLab[i];
+        if (!clusters[c]) clusters[c] = [];
+        clusters[c].push(i);
+      }
+      const cKeys = Object.keys(clusters).map(Number).sort((a, b) => a - b);
+      function avgIntra(idxs) {
+        let s = 0, c = 0;
+        for (let i = 0; i < idxs.length; i++) for (let j = i + 1; j < idxs.length; j++) {
+          s += D[idxs[i]][idxs[j]];
+          c++;
+        }
+        return c ? s / c : 0;
+      }
+      let bestInter = 0;
+      for (let a = 0; a < cKeys.length; a++) for (let b = a + 1; b < cKeys.length; b++) {
+        let s = 0, c = 0;
+        for (const i of clusters[cKeys[a]]) for (const j of clusters[cKeys[b]]) { s += D[i][j]; c++; }
+        const m = c ? s / c : 0;
+        if (m > bestInter) bestInter = m;
+      }
+      const intraRows = cKeys.map((c) => [`Cluster ${c + 1}`, clusters[c].map((i) => `G${i + 1}`).join(", "), avgIntra(clusters[c]), clusters[c].length]);
+
+      const het = heterosisRows();
+      const mphMean = het.length ? mean(het.map((r) => r[4])) : 0;
+      const bphMean = het.length ? mean(het.map((r) => r[5])) : 0;
+
+      $("#d2Kpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">Methods combined</div><div class="value">${methods.join(", ")}</div></div>
+          <div class="kpi"><div class="label">Consensus clusters</div><div class="value">${cKeys.length}</div></div>
+          <div class="kpi"><div class="label">Max inter-cluster D</div><div class="value">${bestInter.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Mean MP heterosis</div><div class="value">${mphMean.toFixed(2)}%</div></div>
+          <div class="kpi"><div class="label">Mean BP heterosis</div><div class="value">${bphMean.toFixed(2)}%</div></div>
+        </div>
+      `;
+
+      const tMethod = buildTable(
+        ["Method", "Clusters formed"],
+        methods.map((m, idx) => [m, new Set(labelSets[idx]).size])
+      );
+      // Cluster means (trait-wise)
+      const traitCount = X[0].length;
+      const clusterMeanRows = [];
+      for (const c of cKeys) {
+        const members = clusters[c];
+        const means = Array.from({ length: traitCount }, (_, t) => mean(members.map((i) => X[i][t])));
+        clusterMeanRows.push([`Cluster ${c + 1}`, ...means]);
+      }
+      const tClusterMeans = buildTable(
+        ["Cluster", ...Array.from({ length: traitCount }, (_, t) => `Trait${t + 1} mean`)],
+        clusterMeanRows
+      );
+
+      // Percentage contribution by traits to total D2 (sum of squared pairwise differences)
+      const contrib = Array(traitCount).fill(0);
+      let totalContrib = 0;
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          for (let t = 0; t < traitCount; t++) {
+            const d = X[i][t] - X[j][t];
+            const d2 = d * d;
+            contrib[t] += d2;
+            totalContrib += d2;
+          }
+        }
+      }
+      const contribRows = contrib.map((v, t) => [
+        `Trait${t + 1}`,
+        v,
+        totalContrib <= 1e-12 ? 0 : (v / totalContrib) * 100,
+      ]);
+      contribRows.sort((a, b) => Number(b[2]) - Number(a[2]));
+      const tContrib = buildTable(
+        ["Trait", "Contribution sum (D2 basis)", "Contribution (%)"],
+        contribRows
+      );
+
+      const tCons = buildTable(
+        ["Consensus cluster", "Members", "Intra-cluster D (avg)", "Size"],
+        intraRows
+      );
+      const tHet = buildTable(
+        ["Cross", "P1", "P2", "F1", "Mid-parent heterosis (%)", "Better-parent heterosis (%)"],
+        het
+      );
+
+      $("#d2Tables").innerHTML =
+        `<h4>Table 1. Method-wise cluster counts</h4>${tMethod}` +
+        `<div style="height:10px"></div><h4>Table 2. Consensus clustering summary</h4>${tCons}` +
+        `<div style="height:10px"></div><h4>Table 3. Cluster means by traits</h4>${tClusterMeans}` +
+        `<div style="height:10px"></div><h4>Table 4. Trait-wise percentage contribution to D2</h4>${tContrib}` +
+        `<div style="height:10px"></div><h4>Table 5. Heterosis values</h4>${tHet}`;
+
+      const consensusSpread = cKeys.length;
+      const deviationHtml = deviationBanner("d2", { bestInterCluster: bestInter, consensusSpread }, ["bestInterCluster", "consensusSpread"]);
+      const interpretation =
+        `D2 analysis with multiple clustering methods provides robust grouping by comparing method-specific partitions and a combined consensus pattern.\n\n` +
+        `Combined methods: ${methods.join(", ")}.\n` +
+        `Consensus clusters: ${cKeys.length}, max inter-cluster distance=${bestInter.toFixed(3)}.\n` +
+        `Top D2-contributing trait: ${String(contribRows[0]?.[0] || "Trait1")} (${Number(contribRows[0]?.[2] || 0).toFixed(2)}%).\n\n` +
+        `Heterosis summary: mean MPH=${mphMean.toFixed(2)}%, mean BPH=${bphMean.toFixed(2)}%.\n` +
+        `Large inter-cluster distances and positive heterosis in selected inter-cluster crosses support divergence-based hybrid selection.`;
+      setInterpretation("d2", interpretation, deviationHtml || "", { bestInterCluster: bestInter, consensusSpread });
+    });
+  }
+
+  // --- Metroglyph visual module ---
+  function renderMetroglyph() {
+    const title = "Metroglyph Analysis (Visualizer)";
+    showContentHeader({
+      title,
+      subtitle: "Visualize multi-trait genotype patterns as glyphs with cluster colors and customizable scaling.",
+    });
+
+    const defaultN = 12;
+    const defaultT = 4;
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Input</div><div class="value">Genotype x Trait matrix + cluster labels</div></div>
+        <div class="kpi"><div class="label">Output</div><div class="value">Metroglyph pattern map</div></div>
+        <div class="kpi"><div class="label">Controls</div><div class="value">Glyph size, stroke, trait scaling</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Input table</h4>
+            <div class="input-grid">
+              <div class="two-col">
+                <label>Genotypes (n)<input type="number" min="6" max="40" id="mgN" value="${defaultN}" /></label>
+                <label>Traits (p)<input type="number" min="2" max="8" id="mgT" value="${defaultT}" /></label>
+              </div>
+              <div class="two-col">
+                <label>Glyph size<input type="number" min="6" max="24" id="mgSize" value="12" /></label>
+                <label>Stroke width<input type="number" min="1" max="4" step="0.5" id="mgStroke" value="1.5" /></label>
+              </div>
+              <label>Trait scaling mode
+                <select id="mgScale">
+                  <option value="global">Global (all traits together)</option>
+                  <option value="per-trait">Per trait (recommended)</option>
+                </select>
+              </label>
+              <button class="action-btn primary2" type="button" id="mgBuild">Build metroglyph table</button>
+            </div>
+            <div id="mgWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="mgCompute">Draw metroglyph map</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="mgKpis"></div>
+            <div class="chart" style="height:340px;margin-top:12px"><canvas id="mgChart" style="width:100%;height:100%"></canvas></div>
+            <div id="mgTables" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "metroglyph",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["patternSpread", "clusterBalance"],
+    });
+
+    function build(n, p) {
+      const wrap = $("#mgWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Genotype", "Cluster", ...Array.from({ length: p }, (_, j) => `Trait${j + 1}`)];
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < n; i++) {
+        const cl = (i % 4) + 1;
+        const cells = [];
+        cells.push(`<td><select data-mg="g${i}c">${Array.from({ length: 8 }, (_, k) => `<option value="${k + 1}" ${k + 1 === cl ? "selected" : ""}>C${k + 1}</option>`).join("")}</select></td>`);
+        for (let j = 0; j < p; j++) {
+          const v = 10 + i * 0.8 + j * 1.2 + ((i * (j + 1)) % 5) * 0.6;
+          cells.push(`<td><input type="number" step="0.01" value="${v.toFixed(2)}" data-mg="g${i}t${j}" /></td>`);
+        }
+        rows.push(`<tr><th>G${i + 1}</th>${cells.join("")}</tr>`);
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    function read() {
+      const n = Math.max(6, Math.min(40, Number($("#mgN").value || defaultN)));
+      const p = Math.max(2, Math.min(8, Number($("#mgT").value || defaultT)));
+      const X = Array.from({ length: n }, () => Array(p).fill(0));
+      const C = Array(n).fill(1);
+      for (let i = 0; i < n; i++) {
+        C[i] = Number(document.querySelector(`#mgWrap select[data-mg="g${i}c"]`)?.value || 1);
+        for (let j = 0; j < p; j++) {
+          const v = Number(document.querySelector(`#mgWrap input[data-mg="g${i}t${j}"]`)?.value ?? 0);
+          X[i][j] = Number.isFinite(v) ? v : 0;
+        }
+      }
+      return { n, p, X, C };
+    }
+
+    function normalize(X, mode) {
+      const n = X.length, p = X[0].length;
+      const Y = Array.from({ length: n }, () => Array(p).fill(0));
+      if (mode === "global") {
+        let mn = Infinity, mx = -Infinity;
+        for (const r of X) for (const v of r) { if (v < mn) mn = v; if (v > mx) mx = v; }
+        const d = Math.max(1e-9, mx - mn);
+        for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) Y[i][j] = (X[i][j] - mn) / d;
+      } else {
+        for (let j = 0; j < p; j++) {
+          let mn = Infinity, mx = -Infinity;
+          for (let i = 0; i < n; i++) { if (X[i][j] < mn) mn = X[i][j]; if (X[i][j] > mx) mx = X[i][j]; }
+          const d = Math.max(1e-9, mx - mn);
+          for (let i = 0; i < n; i++) Y[i][j] = (X[i][j] - mn) / d;
+        }
+      }
+      return Y;
+    }
+
+    function draw(canvas, Xn, C, glyphSize, strokeW) {
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(320, Math.floor(rect.width));
+      const h = Math.max(220, Math.floor(rect.height));
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const n = Xn.length, p = Xn[0].length;
+      const cols = Math.ceil(Math.sqrt(n));
+      const rows = Math.ceil(n / cols);
+      const xGap = (w - 20) / cols;
+      const yGap = (h - 20) / rows;
+      const colors = ["#52ffca", "#ffd166", "#7aa2ff", "#ff5c7a", "#9bff66", "#f7a8ff", "#a8ecff", "#ffb38a"];
+
+      for (let i = 0; i < n; i++) {
+        const cx = 10 + (i % cols) * xGap + xGap / 2;
+        const cy = 10 + Math.floor(i / cols) * yGap + yGap / 2;
+        const trait = Xn[i];
+        // star/radial glyph
+        ctx.beginPath();
+        for (let t = 0; t < p; t++) {
+          const ang = -Math.PI / 2 + (2 * Math.PI * t) / p;
+          const r = glyphSize * (0.35 + 0.75 * trait[t]);
+          const x = cx + r * Math.cos(ang);
+          const y = cy + r * Math.sin(ang);
+          if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        const color = colors[(C[i] - 1) % colors.length];
+        ctx.fillStyle = color + "55";
+        ctx.strokeStyle = color;
+        ctx.lineWidth = strokeW;
+        ctx.fill();
+        ctx.stroke();
+
+        // center dot and label
+        ctx.fillStyle = "rgba(234,241,255,0.95)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.font = "700 10px Segoe UI, Arial";
+        ctx.fillText(`G${i + 1}`, cx + 4, cy - 4);
+      }
+    }
+
+    build(defaultN, defaultT);
+    $("#mgBuild").addEventListener("click", () => {
+      const n = Math.max(6, Math.min(40, Number($("#mgN").value || defaultN)));
+      const p = Math.max(2, Math.min(8, Number($("#mgT").value || defaultT)));
+      build(n, p);
+    });
+
+    $("#mgCompute").addEventListener("click", () => {
+      const { n, p, X, C } = read();
+      const mode = String($("#mgScale").value || "per-trait");
+      const size = Math.max(6, Math.min(24, Number($("#mgSize").value || 12)));
+      const stroke = Math.max(1, Math.min(4, Number($("#mgStroke").value || 1.5)));
+      const Xn = normalize(X, mode);
+      draw($("#mgChart"), Xn, C, size, stroke);
+
+      const clusterCounts = {};
+      C.forEach((c) => (clusterCounts[c] = (clusterCounts[c] || 0) + 1));
+      const cRows = Object.keys(clusterCounts).map((k) => [`Cluster ${k}`, clusterCounts[k], ((clusterCounts[k] / n) * 100)]);
+      cRows.sort((a, b) => Number(a[0].split(" ")[1]) - Number(b[0].split(" ")[1]));
+
+      // trait spread summary
+      const spreads = [];
+      for (let t = 0; t < p; t++) {
+        const vals = X.map((r) => r[t]);
+        const mn = Math.min(...vals), mx = Math.max(...vals);
+        spreads.push([`Trait${t + 1}`, mn, mx, mx - mn]);
+      }
+      const patternSpread = mean(spreads.map((r) => Number(r[3])));
+      const largest = spreads.slice().sort((a, b) => Number(b[3]) - Number(a[3]))[0];
+      const clusterBalance = cRows.length ? Math.max(...cRows.map((r) => Number(r[1]))) / Math.max(1, Math.min(...cRows.map((r) => Number(r[1])))) : 1;
+
+      $("#mgKpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">Genotypes</div><div class="value">${n}</div></div>
+          <div class="kpi"><div class="label">Traits per glyph</div><div class="value">${p}</div></div>
+          <div class="kpi"><div class="label">Clusters used</div><div class="value">${cRows.length}</div></div>
+          <div class="kpi"><div class="label">Avg trait spread</div><div class="value">${patternSpread.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Cluster balance ratio</div><div class="value">${clusterBalance.toFixed(3)}</div></div>
+        </div>
+      `;
+
+      const t1 = buildTable(
+        ["Cluster", "Members", "Share (%)"],
+        cRows
+      );
+      const t2 = buildTable(
+        ["Trait", "Min", "Max", "Range"],
+        spreads
+      );
+      $("#mgTables").innerHTML = `<h4>Table 1. Cluster composition</h4>${t1}<div style="height:10px"></div><h4>Table 2. Trait range summary</h4>${t2}`;
+
+      const deviationHtml = deviationBanner("metroglyph", { patternSpread, clusterBalance }, ["patternSpread", "clusterBalance"]);
+      const interpretation =
+        `Metroglyph visualization represents each genotype as a radial glyph where each spoke corresponds to a trait value.\n\n` +
+        `Current pattern summary:\n` +
+        `• Average trait spread=${patternSpread.toFixed(3)}\n` +
+        `• Largest spread trait=${largest[0]} (range=${Number(largest[3]).toFixed(3)})\n` +
+        `• Cluster balance ratio=${clusterBalance.toFixed(3)}\n\n` +
+        `Use this visual to quickly identify extreme genotypes, balanced profiles, and cluster-specific trait signatures for selection planning.`;
+      setInterpretation("metroglyph", interpretation, deviationHtml || "", { patternSpread, clusterBalance });
+    });
+  }
+
   // --- Template educational modules (pre-rendered tables/plots) ---
   function renderEducationalModule({ moduleId, title, subtitle, tables, chart, interpretation, deviationKeys = [] }) {
     showContentHeader({ title, subtitle });
@@ -5505,6 +6740,10 @@
     if (id === "regression") return renderRegression();
     if (id === "pca") return renderPCA();
     if (id === "path") return renderPathCalculator();
+    if (id === "discriminant") return renderDiscriminant();
+    if (id === "factoranalysis") return renderFactorAnalysis();
+    if (id === "d2") return renderD2Analysis();
+    if (id === "metroglyph") return renderMetroglyph();
     if (id === "linetester") return renderLineTester();
     if (id === "diallel") return renderDiallelGraphical();
     if (id === "nc") return renderNCDesigns();
