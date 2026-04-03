@@ -928,6 +928,329 @@
     return out;
   }
 
+  /** Upper-tail p-value for F(df1, df2). Uses jStat when available. */
+  function fPValueUpperTail(F, df1, df2) {
+    if (!Number.isFinite(F) || F < 0) return 1;
+    if (typeof jStat !== "undefined" && jStat.centralF && typeof jStat.centralF.cdf === "function") {
+      return Math.max(0, Math.min(1, 1 - jStat.centralF.cdf(F, df1, df2)));
+    }
+    return 1;
+  }
+
+  function powerIterationSymmetricMatrix(A, iters = 120) {
+    const n = A.length;
+    let v = Array.from({ length: n }, (_, i) => Math.sin(i + 1.7));
+    let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+    v = v.map((x) => x / norm);
+    for (let t = 0; t < iters; t++) {
+      const Av = matVecMul(A, v);
+      norm = Math.sqrt(Av.reduce((s, x) => s + x * x, 0)) || 1;
+      v = Av.map((x) => x / norm);
+    }
+    const Av = matVecMul(A, v);
+    const lambda = v.reduce((s, x, i) => s + x * Av[i], 0);
+    return { lambda: Math.max(0, lambda), v };
+  }
+
+  function deflateSymmetric(A, lambda, v) {
+    return A.map((row, i) => row.map((cell, j) => cell - lambda * v[i] * v[j]));
+  }
+
+  /** SVD of interaction matrix I via I I' deflation; returns singular values and left/right vectors. */
+  function svdInteractionMatrix(I, maxAxes = 12) {
+    const g = I.length;
+    const e = I[0].length;
+    const B = Array.from({ length: g }, () => Array(g).fill(0));
+    for (let i = 0; i < g; i++) {
+      for (let k = 0; k < g; k++) {
+        let s = 0;
+        for (let j = 0; j < e; j++) s += I[i][j] * I[k][j];
+        B[i][k] = s;
+      }
+    }
+    let Bk = B.map((r) => r.slice());
+    const sigmas = [];
+    const uVecs = [];
+    const vVecs = [];
+    const kMax = Math.min(maxAxes, Math.min(g, e) - 1);
+    for (let k = 0; k < kMax; k++) {
+      const { lambda, v } = powerIterationSymmetricMatrix(Bk, 140);
+      if (lambda < 1e-16) break;
+      const sigma = Math.sqrt(lambda);
+      const u = v;
+      const vv = Array(e).fill(0);
+      for (let j = 0; j < e; j++) {
+        let s = 0;
+        for (let i = 0; i < g; i++) s += I[i][j] * u[i];
+        vv[j] = sigma > 1e-14 ? s / sigma : 0;
+      }
+      sigmas.push(sigma);
+      uVecs.push(u);
+      vVecs.push(vv);
+      Bk = deflateSymmetric(Bk, lambda, u);
+    }
+    return { sigmas, uVecs, vVecs };
+  }
+
+  /** Impute missing cells (row mean → column mean → global mean). Returns cleaned matrix + note. */
+  function imputeGxEMatrix(M0, g, e) {
+    const M = M0.map((row) => row.slice());
+    const flatAll = [];
+    for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) if (Number.isFinite(M[i][j])) flatAll.push(M[i][j]);
+    const gMean = flatAll.length ? mean(flatAll) : 0;
+    for (let i = 0; i < g; i++) {
+      const row = [];
+      for (let j = 0; j < e; j++) if (Number.isFinite(M[i][j])) row.push(M[i][j]);
+      const rm = row.length ? mean(row) : gMean;
+      for (let j = 0; j < e; j++) if (!Number.isFinite(M[i][j])) M[i][j] = rm;
+    }
+    for (let j = 0; j < e; j++) {
+      const col = [];
+      for (let i = 0; i < g; i++) if (Number.isFinite(M[i][j])) col.push(M[i][j]);
+      const cm = col.length ? mean(col) : gMean;
+      for (let i = 0; i < g; i++) if (!Number.isFinite(M[i][j])) M[i][j] = cm;
+    }
+    for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) if (!Number.isFinite(M[i][j])) M[i][j] = gMean;
+    return M;
+  }
+
+  /** Balanced two-way ANOVA on cell means (one observation per G×E). */
+  function twoWayAnovaCellMeans(M, g, e) {
+    const flat = [];
+    for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) flat.push(M[i][j]);
+    const grand = mean(flat);
+    const gMeans = M.map((row) => mean(row));
+    const eMeans = Array.from({ length: e }, (_, j) => mean(M.map((r) => r[j])));
+    let ssTotal = 0;
+    for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) ssTotal += (M[i][j] - grand) ** 2;
+    let ssG = 0;
+    for (let i = 0; i < g; i++) ssG += e * (gMeans[i] - grand) ** 2;
+    let ssE = 0;
+    for (let j = 0; j < e; j++) ssE += g * (eMeans[j] - grand) ** 2;
+    const ssGE = Math.max(0, ssTotal - ssG - ssE);
+    const dfG = g - 1;
+    const dfE = e - 1;
+    const dfGE = (g - 1) * (e - 1);
+    const dfT = g * e - 1;
+    const msG = ssG / dfG;
+    const msE = ssE / dfE;
+    const msGE = ssGE / dfGE;
+    const F_G = msGE <= 1e-18 ? 0 : msG / msGE;
+    const F_E = msGE <= 1e-18 ? 0 : msE / msGE;
+    const pG = fPValueUpperTail(F_G, dfG, dfGE);
+    const pE = fPValueUpperTail(F_E, dfE, dfGE);
+    return { grand, gMeans, eMeans, ssTotal, ssG, ssE, ssGE, dfG, dfE, dfGE, dfT, msG, msE, msGE, F_G, F_E, pG, pE };
+  }
+
+  function doubleCenterInteraction(M, g, e, grand, gMeans, eMeans) {
+    const I = Array.from({ length: g }, () => Array(e).fill(0));
+    for (let i = 0; i < g; i++) for (let j = 0; j < e; j++) I[i][j] = M[i][j] - gMeans[i] - eMeans[j] + grand;
+    return I;
+  }
+
+  /** Gollob sequential F-tests for multiplicative terms (df_k = g+e-1-2k for axis k). */
+  function gollobSequentialTests(sigmas, g, e) {
+    const dfGE = (g - 1) * (e - 1);
+    const ssGE = sigmas.reduce((s, sig) => s + sig * sig, 0);
+    let ssRem = ssGE;
+    let dfRem = dfGE;
+    const rows = [];
+    for (let k = 0; k < sigmas.length; k++) {
+      const ssK = sigmas[k] * sigmas[k];
+      const dfK = g + e - 1 - 2 * (k + 1);
+      if (dfK <= 0 || dfRem <= dfK) break;
+      const ssRes = ssRem - ssK;
+      const dfRes = dfRem - dfK;
+      if (dfRes <= 0 || ssRes < -1e-8) break;
+      const msK = ssK / dfK;
+      const msRes = ssRes / dfRes;
+      const F = msRes <= 1e-18 ? 0 : msK / msRes;
+      const p = fPValueUpperTail(F, dfK, dfRes);
+      const pctOfSSGE = ssGE > 1e-18 ? (ssK / ssGE) * 100 : 0;
+      rows.push({ axis: k + 1, ss: ssK, df: dfK, pctOfSSGE, F, p, ssRes, dfRes });
+      ssRem = ssRes;
+      dfRem = dfRes;
+    }
+    return rows;
+  }
+
+  /** AMMI biplot with repelled labels (ggrepel-style iterative separation). */
+  function drawAmmiBiplotPublication(canvas, gPts, ePts, { title, xLabel, yLabel } = {}) {
+    const { ctx, w, h } = setupCanvas(canvas);
+    const padL = 72;
+    const padR = 18;
+    const padT = title ? 40 : 26;
+    const padB = 58;
+    const all = [
+      ...gPts.map((p) => ({ ...p, kind: "G" })),
+      ...ePts.map((p) => ({ ...p, kind: "E" })),
+    ];
+    const xs = all.map((p) => p.x);
+    const ys = all.map((p) => p.y);
+    const sx = niceScale(Math.min(...xs), Math.max(...xs), 6);
+    const sy = niceScale(Math.min(...ys), Math.max(...ys), 6);
+    const minX = sx.min;
+    const maxX = sx.max;
+    const minY = sy.min;
+    const maxY = sy.max;
+    const rangeX = Math.max(1e-12, maxX - minX);
+    const rangeY = Math.max(1e-12, maxY - minY);
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+    const plotLeft = padL;
+    const plotRight = padL + plotW;
+    const gx = (xv) => plotLeft + ((xv - minX) / rangeX) * plotW;
+    const gy = (yv) => plotBottom - ((yv - minY) / rangeY) * plotH;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    if (title) {
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 14px Segoe UI, Arial, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, padL, 8);
+    }
+    ctx.strokeStyle = CHART.frame;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+    const grid = 6;
+    for (let i = 0; i <= grid; i++) {
+      const t = i / grid;
+      const y = plotBottom - t * plotH;
+      ctx.strokeStyle = CHART.grid;
+      ctx.beginPath();
+      ctx.moveTo(plotLeft, y);
+      ctx.lineTo(plotRight, y);
+      ctx.stroke();
+      const val = minY + (maxY - minY) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatChartTick(val), plotLeft - 8, y);
+    }
+    for (let j = 0; j <= grid; j++) {
+      const t = j / grid;
+      const x = plotLeft + t * plotW;
+      ctx.strokeStyle = CHART.grid;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      const val = minX + (maxX - minX) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 10px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(formatChartTick(val), x, plotBottom + 6);
+    }
+    ctx.strokeStyle = CHART.axis;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, plotBottom);
+    ctx.lineTo(plotRight, plotBottom);
+    ctx.moveTo(plotLeft, plotTop);
+    ctx.lineTo(plotLeft, plotBottom);
+    ctx.stroke();
+
+    const marks = all.map((p) => {
+      const px = gx(p.x);
+      const py = gy(p.y);
+      return { px, py, label: p.label, kind: p.kind, ox: 8, oy: -8 };
+    });
+    for (let iter = 0; iter < 45; iter++) {
+      for (let i = 0; i < marks.length; i++) {
+        for (let j = i + 1; j < marks.length; j++) {
+          const a = marks[i];
+          const b = marks[j];
+          const ax = a.px + a.ox;
+          const ay = a.py + a.oy;
+          const bx = b.px + b.ox;
+          const by = b.py + b.oy;
+          const dx = ax - bx;
+          const dy = ay - by;
+          const dist = Math.hypot(dx, dy) || 1;
+          const minD = 38;
+          if (dist < minD) {
+            const push = (minD - dist) / 2;
+            const ux = (dx / dist) * push;
+            const uy = (dy / dist) * push;
+            a.ox += ux;
+            a.oy += uy;
+            b.ox -= ux;
+            b.oy -= uy;
+          }
+        }
+        const k = 0.12;
+        marks[i].ox *= 1 - k;
+        marks[i].oy *= 1 - k;
+      }
+    }
+
+    for (const p of all) {
+      const px = gx(p.x);
+      const py = gy(p.y);
+      if (p.kind === "G") {
+        ctx.fillStyle = "rgba(5, 150, 105, 0.95)";
+        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = "rgba(217, 119, 6, 0.95)";
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.35)";
+        ctx.lineWidth = 1.2;
+        const s = 5;
+        ctx.beginPath();
+        ctx.moveTo(px, py - s);
+        ctx.lineTo(px + s, py);
+        ctx.lineTo(px, py + s);
+        ctx.lineTo(px - s, py);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+    for (let i = 0; i < marks.length; i++) {
+      const m = marks[i];
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(m.px, m.py);
+      ctx.lineTo(m.px + m.ox, m.py + m.oy);
+      ctx.stroke();
+      ctx.fillStyle = CHART.ink;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(m.label, m.px + m.ox + 3, m.py + m.oy);
+    }
+
+    ctx.fillStyle = CHART.inkMuted;
+    ctx.font = "600 12px Segoe UI, Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(xLabel || "", (plotLeft + plotRight) / 2, h - 20);
+    ctx.save();
+    ctx.translate(18, (plotTop + plotBottom) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yLabel || "", 0, 0);
+    ctx.restore();
+
+    ctx.font = "600 10px Segoe UI, Arial, sans-serif";
+    ctx.fillStyle = CHART.inkMuted;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    ctx.fillText("● Genotype  ■ Environment", plotLeft + 4, plotTop + 14);
+  }
+
   function clamp01(x) {
     return Math.max(0, Math.min(1, x));
   }
