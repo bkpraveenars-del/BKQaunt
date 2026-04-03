@@ -4,7 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>BKQuant</title>
+    <meta name="theme-color" content="#064e3b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="BKQuant" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -51,10 +57,183 @@
             <span class="site-header-sub">Agriculture &amp; plant-breeding analytics</span>
           </div>
         </div>
+        <span
+          class="bkq-conn-badge bkq-conn-badge--online"
+          data-bkq-conn
+          role="status"
+          aria-live="polite"
+          title="Connection status"
+          >Online</span
+        >
       </div>
     </header>
 
-    <main class="shell">
+    <main class="shell shell--home">
+      <div id="publicHomeBlock">
+      <!-- Hero + module preview grid (Tailwind; mirrors dashboard card UI) -->
+      <section
+        class="rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white via-slate-50/90 to-emerald-50/30 shadow-xl shadow-slate-200/50 overflow-hidden ring-1 ring-slate-100"
+        aria-labelledby="homeHeroHeading"
+      >
+        <div class="relative px-6 pt-10 pb-8 md:px-10 md:pt-12 md:pb-10 border-b border-slate-100/80 overflow-hidden bg-gradient-to-br from-white via-slate-50/50 to-emerald-50/40">
+          <div class="absolute inset-0 bg-[radial-gradient(ellipse_85%_55%_at_75%_-15%,rgba(16,185,129,0.14),transparent)] pointer-events-none" aria-hidden="true"></div>
+          <div class="relative flex flex-col lg:flex-row lg:items-end lg:justify-between gap-8">
+            <div class="max-w-2xl">
+              <div class="flex flex-wrap gap-2 mb-3">
+                <span class="text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-200/90">Browser-based</span>
+                <span class="text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-white text-slate-700 border border-slate-200 shadow-sm">CSV &amp; Excel</span>
+                <span class="text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-900 border border-indigo-100">Stays on device</span>
+              </div>
+              <p class="text-xs font-bold uppercase tracking-[0.2em] text-emerald-800/90">Agriculture &amp; plant breeding</p>
+              <h1 id="homeHeroHeading" class="mt-2 text-3xl md:text-4xl font-extrabold text-slate-900 tracking-tight leading-[1.15]">
+                Quantitative genetics &amp; trial analytics
+              </h1>
+              <p class="mt-4 text-slate-600 max-w-xl text-[15px] md:text-base leading-relaxed">
+                Run replicated trial ANOVA, G×E, diallel, and multivariate tools in your browser. Upload <strong>CSV</strong> or <strong>Excel</strong> from the dashboard or from each analysis—no server; data stays local.
+              </p>
+              <div class="mt-6 flex flex-wrap gap-3">
+                <a href="#loginCard" class="inline-flex items-center justify-center rounded-xl bg-emerald-700 text-white font-semibold px-5 py-2.5 text-sm shadow-lg shadow-emerald-900/20 hover:bg-emerald-800 transition-colors no-underline">Sign in to analyze</a>
+                <a href="#homeDataFormats" class="inline-flex items-center justify-center rounded-xl border-2 border-slate-200 bg-white text-slate-800 font-semibold px-5 py-2.5 text-sm hover:border-emerald-400 hover:text-emerald-900 transition-colors no-underline">Data format examples</a>
+              </div>
+              <p
+                id="bkqOfflineHint"
+                class="mt-4 text-sm text-amber-950 bg-amber-50 border border-amber-200/90 rounded-xl px-3 py-2.5 max-w-xl leading-snug bkq-offline-hint-hidden shadow-sm"
+                role="status"
+              >
+                You appear offline. Open this site once while online so BKQuant can cache scripts (Tailwind, Chart.js, Plotly, SheetJS, jStat) and run fully offline next time.
+              </p>
+            </div>
+            <div class="hidden lg:flex flex-col gap-3 w-full max-w-[17rem] shrink-0">
+              <div class="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-md shadow-slate-200/80">
+                <p class="text-[10px] font-bold uppercase text-slate-500 tracking-wide">Processing</p>
+                <p class="text-2xl font-black text-emerald-800 mt-0.5">Local only</p>
+                <p class="text-xs text-slate-500 mt-1 leading-snug">No upload to a server—ideal for sensitive trials.</p>
+              </div>
+              <div class="rounded-2xl bg-slate-900 text-emerald-50 p-4 shadow-lg border border-slate-700">
+                <p class="text-[10px] font-bold uppercase text-emerald-400/95 tracking-wide">Analysis modules</p>
+                <p class="text-2xl font-black mt-0.5 text-white">30+</p>
+                <p class="text-xs text-slate-400 mt-1">Designs, MET, genetics &amp; biplots</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-6 md:p-8 bg-slate-50/90">
+          <!-- Card: AMMI -->
+          <a
+            href="#loginCard"
+            class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+          >
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-100 text-green-700">Online</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">AMMI &amp; Biplot</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">G×E matrix, IPCA scores, and stability biplots for multi-environment trials.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+
+          <!-- Diallel -->
+          <a href="#loginCard" class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-100 text-green-700">Online</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">Diallel analysis</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">GCA/SCA and Griffing-style diallel summaries for combining ability.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+
+          <!-- Line × Tester -->
+          <a href="#loginCard" class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="6" width="6" height="12" rx="1"/><path d="M14 8h6"/><path d="M14 12h6"/><path d="M14 16h6"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-100 text-green-700">Online</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">Line × Tester</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">Hybrid performance, variance ratios, and genetic contribution across testers.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+
+          <!-- MET -->
+          <a href="#loginCard" class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-100 text-green-700">Online</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">MET &amp; stability</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">Multi-environment summaries, Eberhart–Russell, and Finlay–Wilkinson-style views.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+
+          <!-- Factorial -->
+          <a href="#loginCard" class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-100 text-green-700">Online</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">Factorial &amp; split-plot</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">RBD factorials, three-factor models, and split-plot error strata.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+
+          <!-- Correlation & Path — offline-style badge -->
+          <a href="#loginCard" class="group relative bg-white border border-slate-200/90 rounded-2xl p-6 shadow-sm hover:shadow-xl hover:border-emerald-200/80 transition-all duration-300 hover:-translate-y-0.5 no-underline text-inherit block focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2">
+            <div class="flex justify-between items-start mb-4">
+              <div class="p-3 bg-emerald-50 rounded-lg text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              </div>
+              <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-slate-100 text-slate-600">Offline-ready</span>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 mb-2">Correlation &amp; path</h3>
+            <p class="text-sm text-slate-500 mb-6 line-clamp-2">Pearson/Spearman, path-style diagrams, and multi-trait matrices.</p>
+            <span class="inline-flex w-full justify-center py-2 px-4 bg-slate-900 text-white rounded-lg font-medium group-hover:bg-emerald-600 transition-colors text-sm">Launch analysis</span>
+          </a>
+        </div>
+
+        <div id="homeDataFormats" class="border-t border-slate-200/90 bg-gradient-to-b from-slate-50/95 to-emerald-50/25 px-6 py-9 md:px-10 md:py-11">
+          <h2 class="text-xl md:text-2xl font-extrabold text-slate-900 tracking-tight">Data upload formats</h2>
+          <p class="mt-2 text-slate-600 text-sm md:text-[15px] max-w-3xl leading-relaxed">
+            After you sign in, the <strong>dashboard</strong> can hold a session file (CSV or Excel). Each module also has <strong>Import CSV / Excel</strong>—the first worksheet of an <strong>.xlsx</strong> file is read as comma-separated text. Use each module’s <strong>Download template CSV</strong> when dimensions must match exactly.
+          </p>
+          <div class="mt-6 grid md:grid-cols-3 gap-4">
+            <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 class="text-sm font-bold text-emerald-900 mb-2">Wide table (genotypes × traits)</h3>
+              <pre class="text-[11px] leading-relaxed text-slate-700 bg-slate-50 rounded-lg p-3 overflow-x-auto border border-slate-100 font-mono">Genotype,Yield,Protein
+G1,32.1,12.4
+G2,34.2,11.8
+G3,31.5,12.1</pre>
+              <p class="text-xs text-slate-500 mt-2">Data Insights, PCA-style matrices</p>
+            </div>
+            <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 class="text-sm font-bold text-emerald-900 mb-2">G × E matrix</h3>
+              <pre class="text-[11px] leading-relaxed text-slate-700 bg-slate-50 rounded-lg p-3 overflow-x-auto border border-slate-100 font-mono">,E1,E2,E3
+G1,4.2,4.5,4.1
+G2,4.6,4.4,4.8</pre>
+              <p class="text-xs text-slate-500 mt-2">AMMI, MET — rows = genotypes</p>
+            </div>
+            <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 class="text-sm font-bold text-emerald-900 mb-2">Grouped / diallel</h3>
+              <pre class="text-[11px] leading-relaxed text-slate-700 bg-slate-50 rounded-lg p-3 overflow-x-auto border border-slate-100 font-mono">ParentA,ParentB,yield
+A,B,12.4
+A,C,11.9
+...</pre>
+              <p class="text-xs text-slate-500 mt-2">Follow each module’s template for crosses and reps</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="card card--brand">
         <p class="brand-quote">
           “Silence isn’t empty; it’s full of answers.”
@@ -67,7 +246,7 @@
       <section class="card" id="homeChartsCard" aria-labelledby="homeChartsHeading">
         <h2 id="homeChartsHeading">Interactive charts (Chart.js)</h2>
         <p class="muted small">
-          <strong>Data input:</strong> Use a clear structure before you run analyses—CSV, Excel (export to CSV when needed), or a tidy Markdown table with one row per genotype and consistent column names.
+          <strong>Data input:</strong> Use <strong>CSV</strong> or <strong>Excel</strong> (.xlsx first sheet) with clear headers—one row per observation or genotype where required. The signed-in dashboard and each module support file upload.
         </p>
         <p class="muted small" style="margin-top:8px">
           <strong>Accuracy:</strong> BKQuant computes statistics in your browser; still double-check critical values such as <em>p</em>-values and mean ± SEm (standard error of the mean) when copying into reports—transcription errors are easy even with AI assistance.
@@ -84,6 +263,7 @@
           Hover or tap for tooltips. Module views (e.g. Biometric Report) may use Plotly or canvas for heavy plots; this homepage uses Chart.js for lightweight, interactive demos.
         </p>
       </section>
+      </div>
 
       <section class="card" id="loginCard">
         <h2>Researcher Login</h2>
@@ -107,34 +287,65 @@
         </form>
       </section>
 
-      <section class="card hidden" id="appCard" aria-live="polite">
-        <header class="app-header">
-          <div>
-            <h2>BKQuant Dashboard</h2>
-            <p class="muted small">
-              Choose an analysis module. Results are exportable as <b>DOC</b> and <b>XLS</b>-style files.
-            </p>
-            <p class="muted small" style="margin-top:4px">BKQuant v1.0</p>
-          </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end">
-            <button class="ghost" id="metaBtn" type="button">Report metadata</button>
-            <button class="ghost" id="logoutBtn" type="button">Log out</button>
-          </div>
-        </header>
-
-        <nav class="analysis-nav">
-          <button class="nav-btn" data-group="data-analysis">Data Analysis</button>
-          <button class="nav-btn" data-group="plant-breeding">Plant Breeding</button>
-        </nav>
-
-        <div class="panel">
-          <aside class="sidebar" id="sidebar"></aside>
-          <div class="content">
-            <div id="contentHeader" class="content-header">
-              <h3>Select a module</h3>
-              <p class="muted">Use the left menu to open full tables, plots, and interpretation.</p>
+      <section id="appCard" class="hidden v2-app" aria-live="polite">
+        <aside class="v2-sidebar" aria-label="BKQuant navigation">
+          <div class="v2-brand">
+            <div class="v2-brand-mark" aria-hidden="true">BK</div>
+            <div class="v2-brand-text">
+              <span class="v2-brand-title">BKQuant</span>
+              <span class="v2-brand-badge">v2.0</span>
             </div>
-            <div id="contentBody"></div>
+          </div>
+          <nav class="v2-sidebar-top">
+            <button type="button" class="v2-nav-item v2-nav-item--active" id="v2DashBtn">
+              <svg class="v2-ico" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+              <span>Dashboard</span>
+            </button>
+            <button type="button" class="v2-nav-item" id="v2ProjectDataBtn" disabled title="Coming soon">
+              <svg class="v2-ico" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+              <span>Project data</span>
+            </button>
+          </nav>
+          <div class="v2-sidebar-label">Analysis modules</div>
+          <div class="v2-group-row">
+            <button type="button" class="nav-btn v2-group-chip" data-group="data-analysis">Data analysis</button>
+            <button type="button" class="nav-btn v2-group-chip" data-group="plant-breeding">Plant breeding</button>
+          </div>
+          <div id="sidebar" class="v2-module-host"></div>
+          <div class="v2-sidebar-foot">
+            <button type="button" class="v2-nav-item" id="v2SettingsBtn" disabled title="Coming soon">
+              <svg class="v2-ico" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>Settings</span>
+            </button>
+          </div>
+        </aside>
+        <div class="v2-main">
+          <header class="v2-toolbar">
+            <div class="v2-toolbar-lead">
+              <h2 class="v2-toolbar-title">Plant breeding analytics</h2>
+              <p class="v2-toolbar-sub" id="v2WelcomeLine">Welcome — select a module to begin.</p>
+            </div>
+            <div class="v2-toolbar-actions">
+              <span
+                class="bkq-conn-badge bkq-conn-badge--online"
+                data-bkq-conn
+                role="status"
+                aria-live="polite"
+                title="Connection status"
+                >Online</span
+              >
+              <label class="v2-search">
+                <svg class="v2-search-ico" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="search" id="v2ModuleSearch" placeholder="Search modules…" autocomplete="off" />
+              </label>
+              <button type="button" class="v2-btn-primary" id="v2NewProjectBtn">New project</button>
+              <button type="button" class="v2-btn-ghost" id="metaBtn">Report metadata</button>
+              <button type="button" class="v2-btn-ghost" id="logoutBtn">Log out</button>
+            </div>
+          </header>
+          <div class="v2-scroll">
+            <div id="contentHeader" class="content-header v2-content-head"></div>
+            <div id="contentBody" class="content v2-content-body"></div>
           </div>
         </div>
       </section>

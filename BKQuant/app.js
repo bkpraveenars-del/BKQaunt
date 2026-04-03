@@ -2,7 +2,7 @@
    - Login gate (localStorage)
    - "Windows icon" style tiles
    - Each analysis renders: input (where simple), results table, chart(s), interpretation
-   - Export to DOC/XLS using HTML + embedded chart images (no external libs, offline-friendly)
+   - Export to DOC/XLS: HTML with separated tables + Plotly PNG + canvas; optional Python matplotlib script for print figures
 */
 
 (() => {
@@ -89,6 +89,165 @@
       .filter((r) => r.some((x) => Number.isFinite(x)));
   }
 
+  const SESSION_UPLOAD_KEY = "bkq_session_upload_v1";
+
+  function getSessionUpload() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_UPLOAD_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  function setSessionUpload(obj) {
+    try {
+      sessionStorage.setItem(SESSION_UPLOAD_KEY, JSON.stringify(obj));
+    } catch {
+      /* quota / private mode */
+    }
+  }
+
+  function clearSessionUpload() {
+    sessionStorage.removeItem(SESSION_UPLOAD_KEY);
+  }
+
+  /** CSV text, or first sheet of Excel as CSV (requires XLSX global from index.html). */
+  async function fileToCsvText(file) {
+    const name = (file.name || "").toLowerCase();
+    const mime = file.type || "";
+    if (name.endsWith(".csv") || name.endsWith(".txt") || name.endsWith(".tsv") || mime.includes("csv") || mime === "text/plain") {
+      return await file.text();
+    }
+    if (
+      name.endsWith(".xlsx") ||
+      name.endsWith(".xls") ||
+      name.endsWith(".ods") ||
+      mime.includes("spreadsheet") ||
+      mime.includes("excel") ||
+      mime.includes("ms-excel")
+    ) {
+      if (typeof XLSX === "undefined") {
+        throw new Error(
+          "Excel files need the SheetJS library. Load BKQuant online once, or save your sheet as CSV (Excel: Save As → CSV UTF-8)."
+        );
+      }
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array", cellDates: true });
+      const sn = wb.SheetNames[0];
+      if (!sn) throw new Error("Workbook has no sheets.");
+      return XLSX.utils.sheet_to_csv(wb.Sheets[sn], { FS: ",", RS: "\n" });
+    }
+    return await file.text();
+  }
+
+  /** Textarea IDs that accept a pasted session CSV block (module id → element id). */
+  const MODULE_SESSION_TEXTAREA = {
+    dataInsights: "diCsv",
+    biometric: "bioMulti",
+    pca: "pcaMatrix",
+    correlation: "corMatrix",
+    mlr: "mlrData",
+    corpath: "cpaData",
+  };
+
+  function injectSessionUploadBanner(moduleId) {
+    const u = getSessionUpload();
+    const tid = MODULE_SESSION_TEXTAREA[moduleId];
+    if (!u?.text || !tid) return;
+    const ta = document.getElementById(tid);
+    const host = $("#contentBody .section");
+    if (!ta || !host || host.querySelector(".bkq-session-banner")) return;
+
+    const bar = document.createElement("div");
+    bar.className = "bkq-session-banner";
+    bar.innerHTML = `<div class="bkq-session-banner-inner">
+      <span>Session file: <strong>${qs(u.name)}</strong> — use Import to load from disk, or apply this session copy below.</span>
+      <button type="button" class="action-btn primary2" data-bkq-session-apply>Apply session upload</button>
+    </div>`;
+    bar.querySelector("[data-bkq-session-apply]")?.addEventListener("click", () => {
+      ta.value = u.text;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    host.insertBefore(bar, host.firstChild);
+  }
+
+  function buildV2DataUploadPanelHtml() {
+    const u = getSessionUpload();
+    const status = u
+      ? `Session file loaded: ${qs(u.name)} — open a module below, or use Import CSV / Excel in the sidebar.`
+      : "No session file yet. Choose a CSV or Excel file below (first sheet is used for .xlsx).";
+    return `<div class="v2-upload-panel">
+      <h4 class="v2-upload-title">Upload data (CSV or Microsoft Excel)</h4>
+      <p class="muted small" style="margin:0 0 10px;line-height:1.5">
+        Most analyses use <strong>Import CSV</strong> inside the module — that now accepts <strong>.xlsx / .xls</strong> (first sheet) as well as .csv.
+        You can also load a file here to keep it in this browser session and apply it to compatible modules in one click.
+      </p>
+      <div class="v2-upload-row">
+        <label class="v2-upload-file-label">
+          <input type="file" id="v2DashUploadFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+          <span>Choose file…</span>
+        </label>
+        <button type="button" class="action-btn" id="v2DashUploadClear">Clear session file</button>
+      </div>
+      <p id="v2DashUploadStatus" class="v2-upload-status">${status}</p>
+      <details class="v2-format-details">
+        <summary>Example layouts (click to expand)</summary>
+        <div class="v2-format-examples">
+          <div class="v2-format-block">
+            <div class="v2-format-label">Genotype × traits (Data Insights, PCA-style)</div>
+            <pre class="v2-format-pre">Genotype,Yield,Protein,Oil
+G1,32.1,12.4,42.0
+G2,34.2,11.8,41.2
+G3,31.5,12.1,40.5</pre>
+          </div>
+          <div class="v2-format-block">
+            <div class="v2-format-label">G × E matrix (AMMI / MET — rows = genotypes, columns = environments)</div>
+            <pre class="v2-format-pre">,E1,E2,E3
+G1,4.2,4.5,4.1
+G2,4.6,4.4,4.8
+G3,4.0,4.3,4.2</pre>
+          </div>
+          <div class="v2-format-block">
+            <div class="v2-format-label">Line × Tester grid (stacked blocks, one row per cross × rep)</div>
+            <pre class="v2-format-pre">R1,R2,R3
+12.1,12.4,11.9
+11.8,12.0,12.2
+…</pre>
+            <p class="muted small" style="margin:6px 0 0">Use each module’s <strong>Download template CSV</strong> for exact dimensions.</p>
+          </div>
+        </div>
+      </details>
+    </div>`;
+  }
+
+  function wireV2DashboardUpload() {
+    const inp = $("#v2DashUploadFile");
+    const status = $("#v2DashUploadStatus");
+    const clearBtn = $("#v2DashUploadClear");
+    if (!inp) return;
+    inp.addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      inp.value = "";
+      if (!f) return;
+      try {
+        const text = await fileToCsvText(f);
+        setSessionUpload({ name: f.name, text, at: new Date().toISOString() });
+        if (status) {
+          status.textContent = `Loaded session file: ${f.name} (${Math.max(1, Math.ceil(text.length / 1024))} KB). Open a module or use Apply session upload where shown.`;
+        }
+      } catch (err) {
+        alert(err?.message || String(err));
+      }
+    });
+    clearBtn?.addEventListener("click", () => {
+      clearSessionUpload();
+      if (status) status.textContent = "Session file cleared. Choose a file above to load again.";
+    });
+  }
+
   function triggerCsvDownload(filename, rows) {
     const csv = rows
       .map((r) =>
@@ -135,31 +294,106 @@
     }
   }
 
-  function exportHtmlAsDocOrXls({ title, moduleId = "", tablesSelector = "table.data", interpretSelector = ".export-interpretation", filename, asExcel }) {
-    const tables = $$(tablesSelector);
+  /**
+   * Figures for DOC/XLS: Plotly (PNG via Plotly.toImage), then canvas (Chart.js / custom), then SVG[data-exportable].
+   * Skips canvas/SVG inside Plotly roots to avoid duplicates.
+   */
+  async function collectExportFigureBlocks() {
+    const blocks = [];
+    let n = 0;
+
+    const plotlyRoots = $$("#contentBody .js-plotly-plot");
+    for (const el of plotlyRoots) {
+      try {
+        if (typeof Plotly !== "undefined" && Plotly.toImage) {
+          const dataUrl = await Plotly.toImage(el, {
+            format: "png",
+            width: 960,
+            height: 560,
+            scale: 2,
+          });
+          n += 1;
+          blocks.push(
+            `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
+              <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n} (chart)</p>
+              <img alt="Figure ${n}" src="${dataUrl}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+            </div>`
+          );
+        }
+      } catch (e) {
+        console.warn("BKQuant export: Plotly figure skipped", e);
+      }
+    }
+
+    const canvases = $$("#contentBody canvas").filter((c) => !c.closest(".js-plotly-plot"));
+    for (const c of canvases) {
+      const src = canvasToDataUrl(c);
+      if (!src) continue;
+      n += 1;
+      blocks.push(
+        `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
+          <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n}</p>
+          <img alt="Figure ${n}" src="${src}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+        </div>`
+      );
+    }
+
+    const svgs = $$('#contentBody svg[data-exportable="1"]').filter((s) => !s.closest(".js-plotly-plot"));
+    for (const s of svgs) {
+      const src = svgToDataUrl(s);
+      if (!src) continue;
+      n += 1;
+      blocks.push(
+        `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
+          <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n}</p>
+          <img alt="Figure ${n}" src="${src}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+        </div>`
+      );
+    }
+
+    if (!blocks.length) {
+      return `<p style="color:#64748b;font-size:12px;margin:12px 0">No figures captured in this view. Use modules with Plotly or Chart.js charts, or build publication-quality PNGs from CSV using python/report_quality_figures.py (see that script).</p>`;
+    }
+    return `<div style="margin:18px 0"><h2 style="font-size:16px;margin:0 0 12px;color:#0f172a">Figures</h2>${blocks.join("\n")}</div>`;
+  }
+
+  function getExportTablesFromContentBody() {
+    const root = $("#contentBody");
+    if (!root) return [];
+    return Array.from(root.querySelectorAll("table")).filter((t) => {
+      if (t.closest(".export-interpretation")) return false;
+      if (t.rows && t.rows.length === 0) return false;
+      return true;
+    });
+  }
+
+  /** Build DOC/XLS HTML with separated tables + embedded figures (Plotly PNG, canvas, SVG). */
+  async function exportHtmlAsDocOrXls({ title, moduleId = "", interpretSelector = ".export-interpretation", filename, asExcel }) {
+    const tables = getExportTablesFromContentBody();
     const interpretation = document.querySelector(interpretSelector)?.innerText || "";
     const meta = loadReportMeta() || {};
 
-    const charts = $$("#contentBody canvas");
-    const chartImgs = charts
-      .map((c) => {
-        const src = canvasToDataUrl(c);
-        if (!src) return "";
-        return `<div class="export-chart"><img alt="chart" src="${src}" style="max-width:100%;height:auto;" /></div>`;
-      })
-      .join("");
-
-    const svgs = $$('#contentBody svg[data-exportable="1"]');
-    const svgImgs = svgs
-      .map((s) => {
-        const src = svgToDataUrl(s);
-        if (!src) return "";
-        return `<div class="export-chart"><img alt="diagram" src="${src}" style="max-width:100%;height:auto;" /></div>`;
-      })
-      .join("");
+    const figureBlocks = await collectExportFigureBlocks();
 
     const tableHtml = tables
-      .map((t) => t.outerHTML)
+      .map((t, i) => {
+        const prev = t.previousElementSibling;
+        const capRaw =
+          prev && prev.tagName === "H4" && prev.dataset.autoCaption === "1"
+            ? String(prev.textContent || "").trim()
+            : t.getAttribute("data-caption") || `Table ${i + 1}`;
+        const spacer =
+          i === 0
+            ? ""
+            : asExcel
+              ? `<table style="width:100%;margin:0"><tr><td style="height:28px;border:none;font-size:1px">&nbsp;</td></tr></table>`
+              : `<hr style="border:none;border-top:2px solid #cbd5e1;margin:22px 0" />`;
+        return `${spacer}
+        <div style="margin:18px 0;page-break-inside:avoid;break-inside:avoid;mso-pagination:widow-orphan">
+          <h3 style="font-size:14px;margin:0 0 10px;color:#0f172a;font-weight:800">${qs(capRaw)}</h3>
+          ${t.outerHTML}
+        </div>`;
+      })
       .join("\n");
 
     const metaRows = [
@@ -215,13 +449,13 @@
       </div>
     `;
 
-    // Word/Excel can open HTML with the right MIME type.
+    // Word/Excel open HTML; explicit spacing + page-break hints for Word; row spacers for Excel HTML.
     const styles = asExcel
-      ? `table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:12px}th,td{border:1px solid #999;padding:6px;text-align:center}h1{font-size:18px}`
-      : `body{font-family:Calibri,Arial,sans-serif}table{border-collapse:collapse}th,td{border:1px solid #aaa;padding:6px}h1{font-size:20px;margin-bottom:8px}`;
+      ? `table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:12px}th,td{border:1px solid #999;padding:6px;text-align:center}h1{font-size:18px}h2{font-size:15px;margin-top:16px}h3{font-size:13px;text-align:left}img{max-width:100%;height:auto}`
+      : `body{font-family:Calibri,Arial,sans-serif;font-size:12px;line-height:1.45}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:6px}h1{font-size:20px;margin-bottom:8px}h2{font-size:16px;margin:20px 0 10px;color:#0f172a}h3{font-size:14px}img{max-width:100%;height:auto}`;
 
     const doc = `<!doctype html>
-<html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
 <head>
   <meta charset="utf-8"/>
   <title>${qs(title)}</title>
@@ -230,7 +464,8 @@
 <body>
   <h1>${qs(title)}</h1>
   ${metaTable}
-  <div>${svgImgs}${chartImgs}</div>
+  ${figureBlocks}
+  <h2>Tables</h2>
   ${tableHtml}
   <h2>Interpretation</h2>
   <p style="white-space:pre-wrap">${qs(interpretation)}</p>
@@ -263,10 +498,10 @@
 
   function setupCanvas(canvas) {
     const ctx = canvas.getContext("2d");
-    const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
-    const w = Math.max(320, Math.floor(rect.width));
-    const h = Math.max(240, Math.floor(rect.height));
+    const w = Math.max(480, Math.floor(rect.width));
+    const h = Math.max(320, Math.floor(rect.height));
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -415,6 +650,127 @@
     }
   }
 
+  /** Bar chart of means with vertical error bars at ±SEm (for RBD/mean plots). */
+  function drawBarChartWithErrorBars(canvas, labels, values, sems, { title } = {}) {
+    const sem = sems && sems.length === values.length ? sems : values.map(() => 0);
+    const { ctx, w, h } = setupCanvas(canvas);
+    const padL = 62;
+    const padR = 18;
+    const padT = title ? 38 : 24;
+    const padB = 62;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const lows = values.map((v, i) => v - sem[i]);
+    const highs = values.map((v, i) => v + sem[i]);
+    const dMin = Math.min(...values, ...lows, 0);
+    const dMax = Math.max(...values, ...highs);
+    const sc = niceScale(dMin, dMax, 6);
+    const min = sc.min;
+    const max = sc.max;
+    const step = sc.step;
+    const grid = Math.max(2, Math.round((max - min) / step));
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+    const range = Math.max(1e-12, max - min);
+    const scaleY = plotH / range;
+    const n = Math.max(1, values.length);
+    const barSlot = plotW / n;
+    const barW = Math.max(8, Math.min(48, barSlot - 10));
+
+    ctx.fillStyle = CHART.bg;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = CHART.frame;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+
+    if (title) {
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, padL, 8);
+    }
+
+    for (let i = 0; i <= grid; i++) {
+      const t = i / grid;
+      const y = plotBottom - t * plotH;
+      ctx.strokeStyle = CHART.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + plotW, y);
+      ctx.stroke();
+      const val = min + (max - min) * t;
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 12px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatChartTick(val), padL - 8, y);
+    }
+
+    ctx.strokeStyle = CHART.axis;
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(padL, plotBottom);
+    ctx.lineTo(padL + plotW, plotBottom);
+    ctx.stroke();
+
+    const gy = (yv) => plotBottom - ((yv - min) / range) * plotH;
+
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      const cx = padL + i * barSlot + barSlot / 2;
+      const x = cx - barW / 2;
+      const bh = (v - min) * scaleY;
+      const y = plotBottom - bh;
+
+      const grad = ctx.createLinearGradient(x, y, x + barW, plotBottom);
+      grad.addColorStop(0, CHART.bar0);
+      grad.addColorStop(1, CHART.bar1);
+      ctx.fillStyle = grad;
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
+      ctx.lineWidth = 1;
+      roundRect(ctx, x, y, barW, bh, 8);
+      ctx.fill();
+      ctx.stroke();
+
+      const cap = 5;
+      const yLo = gy(v - sem[i]);
+      const yHi = gy(v + sem[i]);
+      ctx.strokeStyle = "#475569";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, yLo);
+      ctx.lineTo(cx, yHi);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx - cap, yLo);
+      ctx.lineTo(cx + cap, yLo);
+      ctx.moveTo(cx - cap, yHi);
+      ctx.lineTo(cx + cap, yHi);
+      ctx.stroke();
+
+      if (bh > 18) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 11px Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(formatChartTick(v), cx, y - 4);
+      }
+
+      const lbl = String(labels[i] ?? "");
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.save();
+      ctx.translate(cx, plotBottom + 10);
+      ctx.rotate(-Math.PI / 9);
+      ctx.fillText(lbl.length > 18 ? lbl.slice(0, 17) + "…" : lbl, 0, 0);
+      ctx.restore();
+    }
+  }
+
   function roundRect(ctx, x, y, w, h, r) {
     const rr = Math.min(r, w / 2, h / 2);
     ctx.beginPath();
@@ -538,6 +894,116 @@
     ctx.restore();
   }
 
+  /** PCA biplot: observation scores (PC1 vs PC2) + variable loading vectors (scaled for visibility). */
+  function drawPcaBiplot(canvas, scores12, loadings12, varNames, { title } = {}) {
+    const { ctx, w, h } = setupCanvas(canvas);
+    const padL = 62;
+    const padR = 22;
+    const padT = title ? 38 : 24;
+    const padB = 52;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+    const plotLeft = padL;
+    const plotRight = padL + plotW;
+
+    const sxRaw = scores12.map((r) => r[0]);
+    const syRaw = scores12.map((r) => r[1]);
+    const maxAbsScore = Math.max(...sxRaw.map((x) => Math.abs(x)), ...syRaw.map((y) => Math.abs(y)), 1e-9);
+    const maxAbsLoad = Math.max(
+      0.15,
+      ...loadings12.flatMap((r) => [Math.abs(r[0]), Math.abs(r[1])])
+    );
+    const scaleArrows = (0.5 * maxAbsScore) / maxAbsLoad;
+    const ax = loadings12.map((r) => r[0] * scaleArrows);
+    const ay = loadings12.map((r) => r[1] * scaleArrows);
+
+    const allX = [...sxRaw, ...ax, 0];
+    const allY = [...syRaw, ...ay, 0];
+    const sx = niceScale(Math.min(...allX), Math.max(...allX), 6);
+    const sy = niceScale(Math.min(...allY), Math.max(...allY), 6);
+    const minX = sx.min;
+    const maxX = sx.max;
+    const minY = sy.min;
+    const maxY = sy.max;
+    const rangeX = Math.max(1e-9, maxX - minX);
+    const rangeY = Math.max(1e-9, maxY - minY);
+    const gx = (xv) => plotLeft + ((xv - minX) / rangeX) * plotW;
+    const gy = (yv) => plotBottom - ((yv - minY) / rangeY) * plotH;
+
+    ctx.fillStyle = CHART.bg;
+    ctx.fillRect(0, 0, w, h);
+    if (title) {
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, padL, 8);
+    }
+    ctx.strokeStyle = CHART.frame;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
+
+    const ox = gx(0);
+    const oy = gy(0);
+    if (ox >= plotLeft && ox <= plotRight && oy >= plotTop && oy <= plotBottom) {
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ox, plotTop);
+      ctx.lineTo(ox, plotBottom);
+      ctx.moveTo(plotLeft, oy);
+      ctx.lineTo(plotRight, oy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    scores12.forEach((r, idx) => {
+      const px = gx(r[0]);
+      const py = gy(r[1]);
+      ctx.fillStyle = CHART.pointPalette[idx % CHART.pointPalette.length];
+      ctx.strokeStyle = CHART.pointStroke;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(px, py, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+
+    loadings12.forEach((r, j) => {
+      const x1 = r[0] * scaleArrows;
+      const y1 = r[1] * scaleArrows;
+      const px = gx(x1);
+      const py = gy(y1);
+      ctx.strokeStyle = CHART.accentAmber;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.lineTo(px, py);
+      ctx.stroke();
+      ctx.fillStyle = CHART.accentAmber;
+      ctx.font = "700 11px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      const nm = varNames[j] || `V${j + 1}`;
+      ctx.fillText(nm.length > 14 ? nm.slice(0, 13) + "…" : nm, px + 4, py - 2);
+    });
+
+    ctx.fillStyle = CHART.inkMuted;
+    ctx.font = "600 12px Segoe UI, Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText("PC1", (plotLeft + plotRight) / 2, h - 18);
+    ctx.save();
+    ctx.translate(16, (plotTop + plotBottom) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText("PC2", 0, 0);
+    ctx.restore();
+  }
+
   /** Matches drawScatterPlot layout so overlays (regression line, labels) align. */
   function scatterPlotGeo(w, h, withTitle) {
     const padL = 62;
@@ -584,7 +1050,7 @@
     return { level: "ns", ok: false, note: "Not significant (approx.)" };
   }
 
-  function computeBreedingSummaryStats({ meanValue, msGenotype, msError, replications, selectionIntensity = 2.06 }) {
+  function computeBreedingSummaryStats({ meanValue, msGenotype, msError, replications, selectionIntensity = 2.06, dfError = null }) {
     const r = Math.max(1, replications || 1);
     const meanSafe = Math.max(1e-12, Math.abs(meanValue));
     const sigmaG = Math.max(0, (msGenotype - msError) / r);
@@ -600,10 +1066,15 @@
 
     const sem = Math.sqrt(msError / r);
     const sed = Math.sqrt((2 * msError) / r);
-    const cd5 = 2.06 * sed; // approx 5% level
+    let cd5 = 2.06 * sed;
+    let cd1 = 2.76 * sed;
+    if (dfError != null && Number.isFinite(dfError) && dfError > 0) {
+      cd5 = studentTInvTwoTail(dfError, 0.05) * sed;
+      cd1 = studentTInvTwoTail(dfError, 0.01) * sed;
+    }
     const cv = (Math.sqrt(msError) / meanSafe) * 100;
 
-    return { cv, cd5, sem, sed, h2, ga, gaPct, pcv, gcv, ecv, sigmaG, sigmaE, sigmaP };
+    return { cv, cd5, cd1, sem, sed, h2, ga, gaPct, pcv, gcv, ecv, sigmaG, sigmaE, sigmaP };
   }
 
   function parseGridNumbers(text) {
@@ -637,34 +1108,499 @@
     return m;
   }
 
-  // One-way CRD ANOVA (equal reps): treatments x replicates
-  function crdAnova(treatments, reps) {
-    const t = treatments.length;
-    const r = reps;
-    const N = t * r;
-    const all = treatments.flat();
+  /** Line × Tester: % of hybrid (factorial) SS; SE of GCA/SCA; genetic advance; potence ratio. */
+  function lineTesterHybridVariancePct(ssLine, ssTester, ssLT) {
+    const sum = ssLine + ssTester + ssLT;
+    if (sum <= 1e-18) return { pLine: 0, pTester: 0, pLT: 0, sum };
+    return {
+      pLine: (100 * ssLine) / sum,
+      pTester: (100 * ssTester) / sum,
+      pLT: (100 * ssLT) / sum,
+      sum,
+    };
+  }
+
+  function lineTesterSEs(msError, r, l, t) {
+    const rr = Math.max(1, r);
+    return {
+      seLineGca: Math.sqrt(msError / (rr * t)),
+      seTesterGca: Math.sqrt(msError / (rr * l)),
+      seCrossMean: Math.sqrt(msError / rr),
+      seSca: Math.sqrt((msError * (l - 1) * (t - 1)) / (rr * l * t)),
+    };
+  }
+
+  /** GA = k · σ_p · h² with σ_p from line means MS, h² = (MS_L − MSE)/MS_L (narrow on line means). */
+  function lineTesterGeneticAdvance(msLine, msError, r, t, grandMean, k) {
+    const rr = Math.max(1, r);
+    const sigmaP = Math.sqrt(Math.max(1e-18, msLine / (rr * t)));
+    const h2 = msLine <= 1e-18 ? 0 : Math.max(0, (msLine - msError) / msLine);
+    const gaAbs = k * sigmaP * h2;
+    const gaPct = Math.abs(grandMean) > 1e-18 ? (100 * gaAbs) / Math.abs(grandMean) : 0;
+    return { sigmaP, h2, gaAbs, gaPct };
+  }
+
+  /**
+   * Potence ratio: √(σ²_SCA / (2 σ²_GCA_line σ²_GCA_tester)) with σ² from EMS (random model);
+   * altRatio = MS_LT / (MS_Line + MS_Tester) as a simple dominance/additive screen.
+   */
+  function lineTesterPotenceRatio(msLine, msTester, msLT, msError, r, l, t) {
+    const rr = Math.max(1, r);
+    const g2L = Math.max(0, (msLine - msError) / (rr * t));
+    const g2T = Math.max(0, (msTester - msError) / (rr * l));
+    const s2 = Math.max(0, (msLT - msError) / rr);
+    const inner = 2 * g2L * g2T;
+    const potence = inner <= 1e-24 ? 0 : Math.sqrt(s2) / Math.sqrt(inner);
+    const altRatio = msLine + msTester <= 1e-18 ? 0 : msLT / (msLine + msTester);
+    return { potence, altRatio, sigmaSca2: s2, sigmaGcaLine2: g2L, sigmaGcaTester2: g2T };
+  }
+
+  /** Single check vs hybrid mean contrast (1 df); same MSE as hybrid analysis (approximate). */
+  function lineTesterCheckContrastSS(meanCheck, meanHybrid, r, l, t) {
+    const lt = l * t;
+    const diff = meanCheck - meanHybrid;
+    const ss = (r * lt * diff * diff) / (lt + 1);
+    return { ss, df: 1, ms: ss };
+  }
+
+  /**
+   * NC Design I (balanced): females nested within males; y[i][j][k] = rep k of cross male i × female j.
+   * Partition: Males, Females within Males, Error (RCBD-style blocks optional — here CRD pooled error).
+   */
+  function ncDesign1NestedAnova(y, a, b, r) {
+    let sumY2 = 0;
+    let G = 0;
+    const Ti = Array(a).fill(0);
+    const Tij = Array.from({ length: a }, () => Array(b).fill(0));
+    for (let i = 0; i < a; i++) {
+      for (let j = 0; j < b; j++) {
+        for (let k = 0; k < r; k++) {
+          const v = y[i][j][k];
+          sumY2 += v * v;
+          G += v;
+          Ti[i] += v;
+          Tij[i][j] += v;
+        }
+      }
+    }
+    const N = a * b * r;
+    const CF = (G * G) / N;
+    const ssTotal = sumY2 - CF;
+    let ssM = 0;
+    for (let i = 0; i < a; i++) ssM += (Ti[i] * Ti[i]) / (b * r);
+    ssM -= CF;
+    let ssFM = 0;
+    for (let i = 0; i < a; i++) {
+      for (let j = 0; j < b; j++) ssFM += (Tij[i][j] * Tij[i][j]) / r;
+      ssFM -= (Ti[i] * Ti[i]) / (b * r);
+    }
+    const ssError = ssTotal - ssM - ssFM;
+    const dfM = a - 1;
+    const dfFM = a * (b - 1);
+    const dfE = a * b * (r - 1);
+    const msM = dfM > 0 ? ssM / dfM : 0;
+    const msFM = dfFM > 0 ? ssFM / dfFM : 0;
+    const msE = dfE > 0 ? ssError / dfE : 0;
+    const fM = msFM <= 1e-18 ? 0 : msM / msFM;
+    const fFM = msE <= 1e-18 ? 0 : msFM / msE;
+    const sigma2e = msE;
+    const sigmaFM = Math.max(0, (msFM - msE) / r);
+    const sigmaM = Math.max(0, (msM - msFM) / (r * b));
+    const VA = 4 * sigmaM;
+    const VD = Math.max(0, 4 * (sigmaFM - sigmaM));
+    return {
+      ssTotal,
+      ssM,
+      ssFM,
+      ssError,
+      dfM,
+      dfFM,
+      dfE,
+      msM,
+      msFM,
+      msE,
+      fM,
+      fFM,
+      sigmaM,
+      sigmaFM,
+      sigma2e,
+      VA,
+      VD,
+      grandMean: G / N,
+    };
+  }
+
+  /**
+   * NC Design II / III (balanced factorial): males × females × reps; same SS as L×T without rep blocking in total partition.
+   * Uses RCBD partition: Replication + Males + Females + M×F + Error.
+   */
+  function ncDesign2FactorialAnova(y, a, b, r) {
+    let sumY2 = 0;
+    let G = 0;
+    const repTotals = Array(r).fill(0);
+    const maleTotals = Array(a).fill(0);
+    const femaleTotals = Array(b).fill(0);
+    const crossTotals = Array.from({ length: a }, () => Array(b).fill(0));
+    for (let i = 0; i < a; i++) {
+      for (let j = 0; j < b; j++) {
+        for (let k = 0; k < r; k++) {
+          const v = y[i][j][k];
+          sumY2 += v * v;
+          G += v;
+          repTotals[k] += v;
+          maleTotals[i] += v;
+          femaleTotals[j] += v;
+          crossTotals[i][j] += v;
+        }
+      }
+    }
+    const N = a * b * r;
+    const CF = (G * G) / N;
+    const ssTotal = sumY2 - CF;
+    let ssRep = 0;
+    for (let k = 0; k < r; k++) ssRep += (repTotals[k] * repTotals[k]) / (a * b);
+    ssRep -= CF;
+    let ssM = 0;
+    for (let i = 0; i < a; i++) ssM += (maleTotals[i] * maleTotals[i]) / (b * r);
+    ssM -= CF;
+    let ssF = 0;
+    for (let j = 0; j < b; j++) ssF += (femaleTotals[j] * femaleTotals[j]) / (a * r);
+    ssF -= CF;
+    let ssCross = 0;
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) ssCross += (crossTotals[i][j] * crossTotals[i][j]) / r;
+    ssCross -= CF;
+    const ssMF = ssCross - ssM - ssF;
+    const ssError = ssTotal - ssRep - ssM - ssF - ssMF;
+    const dfRep = r - 1;
+    const dfM = a - 1;
+    const dfF = b - 1;
+    const dfMF = (a - 1) * (b - 1);
+    const dfE = (r - 1) * (a * b - 1);
+    const msRep = dfRep > 0 ? ssRep / dfRep : 0;
+    const msM = dfM > 0 ? ssM / dfM : 0;
+    const msF = dfF > 0 ? ssF / dfF : 0;
+    const msMF = dfMF > 0 ? ssMF / dfMF : 0;
+    const msE = dfE > 0 ? ssError / dfE : 0;
+    const fM = msE <= 1e-18 ? 0 : msM / msE;
+    const fF = msE <= 1e-18 ? 0 : msF / msE;
+    const fMF = msE <= 1e-18 ? 0 : msMF / msE;
+    const sigmaM = Math.max(0, (msM - msMF) / (r * b));
+    const sigmaF = Math.max(0, (msF - msMF) / (r * a));
+    const sigmaMF = Math.max(0, (msMF - msE) / r);
+    const VA = 2 * (sigmaM + sigmaF);
+    const VD = 4 * sigmaMF;
+    return {
+      ssTotal,
+      ssRep,
+      ssM,
+      ssF,
+      ssMF,
+      ssError,
+      dfRep,
+      dfM,
+      dfF,
+      dfMF,
+      dfE,
+      msRep,
+      msM,
+      msF,
+      msMF,
+      msE,
+      fM,
+      fF,
+      fMF,
+      sigmaM,
+      sigmaF,
+      sigmaMF,
+      VA,
+      VD,
+      grandMean: G / N,
+    };
+  }
+
+  function ncDegreeDominanceAndH2(VA, VD, VE) {
+    const vp = VA + VD + VE;
+    const h2Narrow = vp <= 1e-18 ? 0 : VA / vp;
+    const ratio = VA <= 1e-18 ? 0 : VD / VA;
+    const degPow4 = ratio <= 0 ? 0 : Math.pow(ratio, 0.25);
+    const degSqrt2 = VA <= 1e-18 ? 0 : Math.sqrt((2 * VD) / VA);
+    return { h2Narrow, ratioVDVA: ratio, degPow4, degSqrt2, vp };
+  }
+
+  /**
+   * One-way CRD ANOVA. `groups` = one array of observations per treatment (lengths may differ).
+   * Treatment SS is Type III for the single factor (same as Σ T_i²/n_i − G²/N).
+   */
+  function crdAnovaOneWay(groups) {
+    const t = groups.length;
+    const ns = groups.map((g) => g.length);
+    const N = ns.reduce((a, b) => a + b, 0);
+    const all = groups.flat();
     const grandTotal = all.reduce((a, b) => a + b, 0);
-    const CF = grandTotal * grandTotal / N;
+    const CF = (grandTotal * grandTotal) / N;
 
     let ssTotal = 0;
     for (const y of all) ssTotal += y * y;
-    ssTotal = ssTotal - CF;
+    ssTotal -= CF;
 
-    const treatmentTotals = treatments.map((arr) => arr.reduce((a, b) => a + b, 0));
+    const treatmentTotals = groups.map((arr) => arr.reduce((a, b) => a + b, 0));
     let ssTreat = 0;
-    for (const Ti of treatmentTotals) ssTreat += (Ti * Ti) / r;
-    ssTreat = ssTreat - CF;
+    for (let i = 0; i < t; i++) ssTreat += (treatmentTotals[i] * treatmentTotals[i]) / ns[i];
+    ssTreat -= CF;
 
     const ssError = ssTotal - ssTreat;
     const dfTreat = t - 1;
     const dfError = N - t;
-    const msTreat = ssTreat / dfTreat;
-    const msError = ssError / dfError;
-    const fStat = msError === 0 ? 0 : msTreat / msError;
+    const msTreat = dfTreat > 0 ? ssTreat / dfTreat : 0;
+    const msError = dfError > 0 ? ssError / dfError : 0;
+    const fStat = msError <= 1e-18 ? 0 : msTreat / msError;
     const sig = approxFSignificance(fStat, dfTreat, dfError);
+    const pTreat = fPValueUpperTail(fStat, dfTreat, dfError);
+    const balanced = ns.every((n) => n === ns[0]);
 
-    const means = treatments.map((arr, i) => ({ treatment: `T${i + 1}`, mean: mean(arr), total: treatmentTotals[i] }));
-    return { ssTotal, ssTreat, ssError, dfTreat, dfError, msTreat, msError, fStat, sig, means };
+    const means = groups.map((arr, i) => ({
+      treatment: `T${i + 1}`,
+      mean: mean(arr),
+      n: ns[i],
+      total: treatmentTotals[i],
+    }));
+    return {
+      ssTotal,
+      ssTreat,
+      ssError,
+      dfTreat,
+      dfError,
+      msTreat,
+      msError,
+      fStat,
+      sig,
+      pTreat,
+      balanced,
+      ns,
+      means,
+    };
+  }
+
+  /** Back-compat: `matrix` rows = treatments; columns = reps (optional empty cells for unequal n). `reps` ignored. */
+  function crdAnova(matrix, reps) {
+    const groups = matrix.map((row) => row.filter((v) => Number.isFinite(v)));
+    return crdAnovaOneWay(groups);
+  }
+
+  /** Levene (mean-based): ANOVA on z_ij = |y_ij − ȳ_i|. Same df as CRD on original data. */
+  function leveneTest(groups) {
+    const zGroups = groups.map((g) => {
+      if (g.length === 0) return [];
+      const m = mean(g);
+      return g.map((v) => Math.abs(v - m));
+    });
+    return crdAnovaOneWay(zGroups);
+  }
+
+  /** Fisher LSD between treatment means i and j (unbalanced): t_{α/2, df_e} √(MSE (1/n_i + 1/n_j)). */
+  function pairwiseFisherLsd(ns, mse, dfError, alphaTwoTail) {
+    if (dfError <= 0 || !Number.isFinite(mse) || mse < 0) return [];
+    const tCrit = studentTInvTwoTail(dfError, alphaTwoTail);
+    const t = ns.length;
+    const rows = [];
+    for (let i = 0; i < t; i++) {
+      for (let j = i + 1; j < t; j++) {
+        const sed = Math.sqrt(mse * (1 / ns[i] + 1 / ns[j]));
+        rows.push({ i, j, lsd: tCrit * sed });
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * Balanced split-plot in RBD: y[i][j][k] with Factor A (i), B (j), blocks/reps (k).
+   * SS: Blocks, A, Error(a)=Blocks×A, B, A×B, Error(b)=residual.
+   * F_A = MS_A/MS_Error(a); F_B and F_AB = MS/MS_Error(b).
+   */
+  function splitPlotRbdAnova(y, a, b, r) {
+    const N = a * b * r;
+    let sumY2 = 0;
+    let G = 0;
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < r; k++) {
+      const v = y[i][j][k];
+      sumY2 += v * v;
+      G += v;
+    }
+    const CF = (G * G) / N;
+    const ssTotal = sumY2 - CF;
+
+    const blockTotals = Array(r).fill(0);
+    const Atotals = Array(a).fill(0);
+    const Btotals = Array(b).fill(0);
+    const ABtotals = Array.from({ length: a }, () => Array(b).fill(0));
+    const AblockTotals = Array.from({ length: r }, () => Array(a).fill(0));
+
+    for (let k = 0; k < r; k++) {
+      for (let i = 0; i < a; i++) {
+        let aik = 0;
+        for (let j = 0; j < b; j++) {
+          const v = y[i][j][k];
+          blockTotals[k] += v;
+          Atotals[i] += v;
+          Btotals[j] += v;
+          ABtotals[i][j] += v;
+          aik += v;
+        }
+        AblockTotals[k][i] = aik;
+      }
+    }
+
+    let ssBlock = 0;
+    for (let k = 0; k < r; k++) ssBlock += (blockTotals[k] * blockTotals[k]) / (a * b);
+    ssBlock -= CF;
+
+    let ssA = 0;
+    for (let i = 0; i < a; i++) ssA += (Atotals[i] * Atotals[i]) / (b * r);
+    ssA -= CF;
+
+    let ssAblock = 0;
+    for (let k = 0; k < r; k++) for (let i = 0; i < a; i++) ssAblock += (AblockTotals[k][i] * AblockTotals[k][i]) / b;
+    ssAblock -= ssBlock + ssA + CF;
+
+    let ssB = 0;
+    for (let j = 0; j < b; j++) ssB += (Btotals[j] * Btotals[j]) / (a * r);
+    ssB -= CF;
+
+    let ssABall = 0;
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) ssABall += (ABtotals[i][j] * ABtotals[i][j]) / r;
+    const ssTreat = ssABall - CF;
+    const ssAB = ssTreat - ssA - ssB;
+
+    const ssErrorB = ssTotal - ssBlock - ssA - ssAblock - ssB - ssAB;
+
+    const dfBlock = r - 1;
+    const dfA = a - 1;
+    const dfErrorA = (r - 1) * (a - 1);
+    const dfB = b - 1;
+    const dfAB = (a - 1) * (b - 1);
+    const dfErrorB = a * (r - 1) * (b - 1);
+    const dfTotal = N - 1;
+
+    const msBlock = dfBlock > 0 ? ssBlock / dfBlock : 0;
+    const msA = dfA > 0 ? ssA / dfA : 0;
+    const msErrorA = dfErrorA > 0 ? ssAblock / dfErrorA : 0;
+    const msB = dfB > 0 ? ssB / dfB : 0;
+    const msAB = dfAB > 0 ? ssAB / dfAB : 0;
+    const msErrorB = dfErrorB > 0 ? ssErrorB / dfErrorB : 0;
+
+    const fA = msErrorA <= 1e-18 ? 0 : msA / msErrorA;
+    const fB = msErrorB <= 1e-18 ? 0 : msB / msErrorB;
+    const fAB = msErrorB <= 1e-18 ? 0 : msAB / msErrorB;
+
+    const pA = fPValueUpperTail(fA, dfA, dfErrorA);
+    const pB = fPValueUpperTail(fB, dfB, dfErrorB);
+    const pAB = fPValueUpperTail(fAB, dfAB, dfErrorB);
+
+    const sigA = approxFSignificance(fA, dfA, dfErrorA);
+    const sigB = approxFSignificance(fB, dfB, dfErrorB);
+    const sigAB = approxFSignificance(fAB, dfAB, dfErrorB);
+
+    const meanA = Atotals.map((T) => T / (b * r));
+    const meanB = Btotals.map((T) => T / (a * r));
+    const meanAB = [];
+    for (let i = 0; i < a; i++) {
+      meanAB[i] = [];
+      for (let j = 0; j < b; j++) meanAB[i][j] = ABtotals[i][j] / r;
+    }
+
+    return {
+      ssTotal,
+      ssBlock,
+      ssA,
+      ssErrorA: ssAblock,
+      ssB,
+      ssAB,
+      ssErrorB,
+      dfBlock,
+      dfA,
+      dfErrorA,
+      dfB,
+      dfAB,
+      dfErrorB,
+      dfTotal,
+      msBlock,
+      msA,
+      msErrorA,
+      msB,
+      msAB,
+      msErrorB,
+      fA,
+      fB,
+      fAB,
+      pA,
+      pB,
+      pAB,
+      sigA,
+      sigB,
+      sigAB,
+      blockTotals,
+      Atotals,
+      Btotals,
+      ABtotals,
+      meanA,
+      meanB,
+      meanAB,
+    };
+  }
+
+  /**
+   * Augmented RCBD (Federer-style): σ² = MS error from checks-only RBD; b = blocks; c = checks.
+   * SED² formulas use σ̂² = MSE (checks).
+   */
+  function augmentedRcbdStandardErrors(mse, b, c) {
+    const s2 = Math.max(0, mse);
+    const seCheckCheck = Math.sqrt((2 * s2) / b);
+    const seEntrySame = Math.sqrt((2 * s2 * (c + 1)) / c);
+    const seEntryDiff = Math.sqrt((2 * s2 * (c + 2)) / c);
+    const seCheckEntry = Math.sqrt((2 * s2 * (c + 1)) / (b * c));
+    return { seCheckCheck, seEntrySame, seEntryDiff, seCheckEntry, s2 };
+  }
+
+  /**
+   * Fisher LSD (CD) for balanced split-plot: A vs Error(a); B, A×B, and simple effects use Error(b).
+   * sedA = √(2·MS_Ea/(br)); sedB = √(2·MS_Eb/(ar)); sed for cell/simple = √(2·MS_Eb/r).
+   */
+  function splitPlotCriticalDifferences(msErrorA, dfErrorA, msErrorB, dfErrorB, a, b, r) {
+    if (dfErrorA <= 0 || dfErrorB <= 0) {
+      return {
+        cdA5: NaN,
+        cdA1: NaN,
+        cdB5: NaN,
+        cdB1: NaN,
+        cdAB5: NaN,
+        cdAB1: NaN,
+        cdSimple5: NaN,
+        cdSimple1: NaN,
+        sedA: NaN,
+        sedB: NaN,
+        sedCell: NaN,
+      };
+    }
+    const t5a = studentTInvTwoTail(dfErrorA, 0.05);
+    const t1a = studentTInvTwoTail(dfErrorA, 0.01);
+    const t5b = studentTInvTwoTail(dfErrorB, 0.05);
+    const t1b = studentTInvTwoTail(dfErrorB, 0.01);
+    const sedA = Math.sqrt((2 * msErrorA) / (b * r));
+    const sedB = Math.sqrt((2 * msErrorB) / (a * r));
+    const sedCell = Math.sqrt((2 * msErrorB) / r);
+    return {
+      cdA5: t5a * sedA,
+      cdA1: t1a * sedA,
+      cdB5: t5b * sedB,
+      cdB1: t1b * sedB,
+      cdAB5: t5b * sedCell,
+      cdAB1: t1b * sedCell,
+      cdSimple5: t5b * sedCell,
+      cdSimple1: t1b * sedCell,
+      sedA,
+      sedB,
+      sedCell,
+    };
   }
 
   // RBD ANOVA: treatments x blocks (balanced)
@@ -791,6 +1727,58 @@
     return den === 0 ? 0 : num / den;
   }
 
+  function erfApprox(x) {
+    const sign = x < 0 ? -1 : 1;
+    const ax = Math.abs(x);
+    const a1 = 0.254829592;
+    const a2 = -0.284496736;
+    const a3 = 1.421413741;
+    const a4 = -1.453152027;
+    const a5 = 1.061405429;
+    const p = 0.3275911;
+    const t = 1 / (1 + p * ax);
+    const y = 1 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t) * Math.exp(-ax * ax);
+    return sign * y;
+  }
+
+  function normalCdf(x) {
+    return 0.5 * (1 + erfApprox(x / Math.SQRT2));
+  }
+
+  /** Two-tailed p-value for H0: rho = 0 (Pearson r); df = n − 2. Uses jStat t CDF when available, else Fisher z + normal. */
+  function pearsonCorrelationPValueTwoTail(r, n) {
+    const df = n - 2;
+    if (df <= 0 || !Number.isFinite(n)) return NaN;
+    if (!Number.isFinite(r)) return NaN;
+    const absR = Math.abs(r);
+    if (absR >= 1) return absR === 1 ? 0 : NaN;
+    const t = absR * Math.sqrt(df / (1 - absR * absR));
+    if (typeof jStat !== "undefined" && jStat.studentt && typeof jStat.studentt.cdf === "function") {
+      return Math.max(0, Math.min(1, 2 * (1 - jStat.studentt.cdf(t, df))));
+    }
+    const z = 0.5 * Math.log((1 + absR) / (1 - absR));
+    const zstat = z * Math.sqrt(Math.max(1, n - 3));
+    return Math.max(0, Math.min(1, 2 * (1 - normalCdf(zstat))));
+  }
+
+  /** Off-diagonal p-values for testing each r_ij = 0 (same n for all pairs). Diagonal entries are NaN. */
+  function buildCorrelationPValueMatrix(R, n) {
+    const p = R.length;
+    const Pv = Array.from({ length: p }, () => Array(p).fill(0));
+    for (let i = 0; i < p; i++) {
+      for (let j = 0; j < p; j++) {
+        Pv[i][j] = i === j ? NaN : pearsonCorrelationPValueTwoTail(R[i][j], n);
+      }
+    }
+    return Pv;
+  }
+
+  function formatCorrelationPValueCell(p) {
+    if (!Number.isFinite(p)) return "—";
+    if (p < 1e-4) return "<0.0001";
+    return p.toFixed(4);
+  }
+
   function simpleLinearRegression(xs, ys) {
     const n = Math.min(xs.length, ys.length);
     const x = xs.slice(0, n);
@@ -812,6 +1800,247 @@
     const r = Sxx === 0 || Syy === 0 ? 0 : Sxy / Math.sqrt(Sxx * Syy);
     const r2 = r * r;
     return { slope, intercept, r, r2 };
+  }
+
+  /** Inverse standard normal CDF (Acklam approximation); uses jStat.normal.inv when available. */
+  function invNormalQuantile(p) {
+    if (!Number.isFinite(p)) return NaN;
+    if (p <= 0) return -1e100;
+    if (p >= 1) return 1e100;
+    if (typeof jStat !== "undefined" && jStat.normal && typeof jStat.normal.inv === "function") {
+      return jStat.normal.inv(p, 0, 1);
+    }
+    const a1 = -39.69683028665376;
+    const a2 = 220.9460984245205;
+    const a3 = -275.9285104469687;
+    const a4 = 138.357751867269;
+    const a5 = -30.66479806614716;
+    const a6 = 2.506628277459239;
+    const b1 = -54.47609879822461;
+    const b2 = 161.5858368580409;
+    const b3 = -155.6989798598866;
+    const b4 = 66.80131188771972;
+    const b5 = -13.28068155288572;
+    const c1 = -0.007784894002040293;
+    const c2 = -0.3223964580411365;
+    const c3 = -2.400758277161838;
+    const c4 = -2.549732539343734;
+    const c5 = 4.374664141464968;
+    const c6 = 2.938163982698783;
+    const d1 = 0.007784695709041462;
+    const d2 = 0.3224671290700398;
+    const d3 = 2.445134137142996;
+    const d4 = 3.754408661907416;
+    const plow = 0.02425;
+    const phigh = 1 - plow;
+    let q;
+    if (p < plow) {
+      q = Math.sqrt(-2 * Math.log(p));
+      return (
+        (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) /
+        ((((d1 * q + d2) * q + d3) * q + d4) * q + 1)
+      );
+    }
+    if (p > phigh) {
+      q = Math.sqrt(-2 * Math.log(1 - p));
+      return (
+        -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) /
+        ((((d1 * q + d2) * q + d3) * q + d4) * q + 1)
+      );
+    }
+    const r = p - 0.5;
+    const r2 = r * r;
+    return (
+      (((((a1 * r2 + a2) * r2 + a3) * r2 + a4) * r2 + a5) * r2 + a6) *
+      r /
+      (((((b1 * r2 + b2) * r2 + b3) * r2 + b4) * r2 + b5) * r2 + 1)
+    );
+  }
+
+  /**
+   * OLS: columns of X include intercept in position 0.
+   * Returns beta, fitted, residuals, sse, sst, r2, r2adj, F for all slopes=0, p-value, m = #slopes.
+   *
+   * Formula reference (industry-standard Python): see `BKQuant/python/industry_standard_stats.py`
+   * — statsmodels OLS / variance_inflation_factor / model AIC; pingouin pairwise_corr for Pearson p-values.
+   * Run: `pip install -r BKQuant/python/requirements.txt` then `python BKQuant/python/run_reference_checks.py`.
+   */
+  function olsFitFromDesign(X, y) {
+    const n = X.length;
+    const p = X[0]?.length || 0;
+    if (n < 2 || p < 1 || y.length !== n) return null;
+    if (n <= p) return null;
+    const Xt = matTranspose(X);
+    const XtX = matMul(Xt, X);
+    const Xty = matVecMul(Xt, y);
+    const inv = invertMatrix(XtX);
+    if (!inv) return null;
+    const beta = matVecMul(inv, Xty);
+    const ybar = mean(y);
+    let sse = 0;
+    let sst = 0;
+    const fitted = Array(n);
+    for (let i = 0; i < n; i++) {
+      let fh = 0;
+      for (let j = 0; j < p; j++) fh += X[i][j] * beta[j];
+      fitted[i] = fh;
+      const e = y[i] - fh;
+      sse += e * e;
+      sst += (y[i] - ybar) ** 2;
+    }
+    const m = p - 1;
+    const ssr = sst - sse;
+    const r2 = sst > 1e-15 ? 1 - sse / sst : 0;
+    const r2adj = n - p > 0 ? 1 - (1 - Math.max(0, Math.min(1, r2))) * ((n - 1) / (n - p)) : NaN;
+    let fStat = 0;
+    let fP = 1;
+    if (m > 0 && sse > 1e-15 && n - p > 0) {
+      fStat = ssr / m / (sse / (n - p));
+      fP = fPValueUpperTail(fStat, m, n - p);
+    } else if (m > 0) {
+      fStat = ssr > 1e-15 ? 1e15 : 0;
+      fP = 0;
+    }
+    return { beta, fitted, residuals: y.map((yi, i) => yi - fitted[i]), sse, sst, ssr, r2, r2adj, fStat, fP, m, n, p };
+  }
+
+  /** VIF for each column of Xraw (no intercept); regress X_j on other predictors + intercept. */
+  function computeVifs(Xraw) {
+    const m = Xraw[0].length;
+    const n = Xraw.length;
+    const vifs = Array(m).fill(1);
+    if (m <= 1) return vifs;
+    for (let j = 0; j < m; j++) {
+      const Z = [];
+      for (let i = 0; i < n; i++) {
+        const row = [1];
+        for (let k = 0; k < m; k++) if (k !== j) row.push(Xraw[i][k]);
+        Z.push(row);
+      }
+      const yj = Xraw.map((row) => row[j]);
+      const aux = olsFitFromDesign(Z, yj);
+      const r2 = aux && aux.sst > 1e-15 ? Math.max(0, Math.min(1, 1 - aux.sse / aux.sst)) : 0;
+      const denom = Math.max(1e-12, 1 - r2);
+      vifs[j] = 1 / denom;
+    }
+    return vifs;
+  }
+
+  /** Iteratively remove predictor with highest VIF while max VIF > threshold. */
+  function vifPrunePredictors(Xraw, predNames, vifMax = 10) {
+    if (!Xraw.length || !Xraw[0]?.length) {
+      return { X: Xraw, names: predNames, removed: [], finalVifs: [] };
+    }
+    let X = Xraw.map((r) => r.slice());
+    let names = predNames.slice();
+    const removed = [];
+    let guard = 0;
+    while (X[0]?.length > 0 && guard++ < 500) {
+      const vifs = computeVifs(X);
+      const maxV = Math.max(...vifs);
+      const j = vifs.indexOf(maxV);
+      if (!Number.isFinite(maxV) || maxV <= vifMax) break;
+      removed.push({ name: names[j], vif: maxV });
+      X = X.map((row) => row.filter((_, idx) => idx !== j));
+      names = names.filter((_, idx) => idx !== j);
+    }
+    const finalVifs = X[0]?.length ? computeVifs(X) : [];
+    return { X, names, removed, finalVifs };
+  }
+
+  /** AIC for Gaussian linear model: n·ln(SSE/n) + 2k, k = number of estimated coefficients (intercept + slopes). */
+  function linearModelAic(n, sse, kCoeffs) {
+    const s = Math.max(sse / n, 1e-15);
+    return n * Math.log(s) + 2 * kCoeffs;
+  }
+
+  /**
+   * Bidirectional stepwise selection by AIC on the given predictor pool (columns of Xraw align with names).
+   */
+  function stepwiseAicSelection(Xraw, y, predNames) {
+    const m = Xraw[0]?.length || 0;
+    if (m === 0) {
+      const X0 = y.map(() => [1]);
+      const fit = olsFitFromDesign(X0, y);
+      return {
+        active: new Set(),
+        fit,
+        aic: fit ? linearModelAic(y.length, fit.sse, fit.beta.length) : Infinity,
+        selectedNames: [],
+      };
+    }
+    let active = new Set(Array.from({ length: m }, (_, i) => i));
+
+    function fitActive(act) {
+      const idx = [...act].sort((a, b) => a - b);
+      if (idx.length === 0) {
+        const Xd = y.map(() => [1]);
+        return olsFitFromDesign(Xd, y);
+      }
+      const Xd = Xraw.map((row) => [1, ...idx.map((c) => row[c])]);
+      return olsFitFromDesign(Xd, y);
+    }
+
+    function aicOf(fit) {
+      if (!fit) return Infinity;
+      return linearModelAic(fit.n, fit.sse, fit.beta.length);
+    }
+
+    let currentFit = fitActive(active);
+    if (!currentFit) {
+      return { active: new Set(), fit: null, aic: Infinity, selectedNames: [] };
+    }
+    let currentAic = aicOf(currentFit);
+    let guard = 0;
+    while (guard++ < 200) {
+      let bestAic = currentAic;
+      let bestSet = null;
+      for (const j of active) {
+        const next = new Set(active);
+        next.delete(j);
+        const f = fitActive(next);
+        const a = aicOf(f);
+        if (f && a < bestAic - 1e-9) {
+          bestAic = a;
+          bestSet = next;
+        }
+      }
+      for (let j = 0; j < m; j++) {
+        if (active.has(j)) continue;
+        const next = new Set(active);
+        next.add(j);
+        const f = fitActive(next);
+        const a = aicOf(f);
+        if (f && a < bestAic - 1e-9) {
+          bestAic = a;
+          bestSet = next;
+        }
+      }
+      if (bestSet === null) break;
+      active = bestSet;
+      currentFit = fitActive(active);
+      if (!currentFit) break;
+      currentAic = aicOf(currentFit);
+    }
+
+    const orderIdx = [...active].sort((a, b) => a - b);
+    const selectedNames = orderIdx.map((i) => predNames[i]);
+    return { active, fit: currentFit, aic: currentAic, selectedNames };
+  }
+
+  function drawQQPlotResiduals(canvas, residuals, { title = "Normal Q-Q (residuals)" } = {}) {
+    const n = residuals.length;
+    const sorted = residuals.map((r, i) => ({ r, i })).sort((a, b) => a.r - b.r);
+    const pts = sorted.map((o, k) => {
+      const p = (k + 0.375) / (n + 0.25);
+      return { x: invNormalQuantile(p), y: o.r };
+    });
+    drawScatterPlot(canvas, pts, { title, xLabel: "Theoretical quantiles", yLabel: "Sample residual" });
+  }
+
+  function drawResidualsVsFittedPlot(canvas, fitted, residuals, { title = "Residuals vs fitted" } = {}) {
+    const pts = fitted.map((f, i) => ({ x: f, y: residuals[i] }));
+    drawScatterPlot(canvas, pts, { title, xLabel: "Fitted", yLabel: "Residual" });
   }
 
   function pca2D(xs, ys) {
@@ -937,6 +2166,27 @@
     return 1;
   }
 
+  /** F critical value with upper-tail area alpha (e.g. 0.05 for F_{0.05}). Uses jStat.centralF.inv or bisection on fPValueUpperTail. */
+  function fCriticalUpperTail(alpha, df1, df2) {
+    if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) return NaN;
+    if (typeof jStat !== "undefined" && jStat.centralF && typeof jStat.centralF.inv === "function") {
+      try {
+        return jStat.centralF.inv(1 - alpha, df1, df2);
+      } catch {
+        /* fall through */
+      }
+    }
+    let lo = 1e-8;
+    let hi = 1e6;
+    for (let k = 0; k < 70; k++) {
+      const mid = (lo + hi) / 2;
+      const pUp = fPValueUpperTail(mid, df1, df2);
+      if (pUp > alpha) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+
   function powerIterationSymmetricMatrix(A, iters = 120) {
     const n = A.length;
     let v = Array.from({ length: n }, (_, i) => Math.sin(i + 1.7));
@@ -954,6 +2204,76 @@
 
   function deflateSymmetric(A, lambda, v) {
     return A.map((row, i) => row.map((cell, j) => cell - lambda * v[i] * v[j]));
+  }
+
+  function matTranspose(A) {
+    const n = A.length;
+    const m = A[0]?.length || 0;
+    return Array.from({ length: m }, (_, j) => Array.from({ length: n }, (_, i) => A[i][j]));
+  }
+
+  function matMul(A, B) {
+    const n = A.length;
+    const k = A[0].length;
+    const m = B[0].length;
+    const C = Array.from({ length: n }, () => Array(m).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < m; j++) {
+        let s = 0;
+        for (let t = 0; t < k; t++) s += A[i][t] * B[t][j];
+        C[i][j] = s;
+      }
+    }
+    return C;
+  }
+
+  /** All eigenpairs of symmetric matrix (deflation + power iteration), sorted by eigenvalue descending. */
+  function symmetricEigenAll(A0) {
+    const n = A0.length;
+    let B = A0.map((r) => r.slice());
+    const vals = [];
+    const vecs = [];
+    for (let c = 0; c < n; c++) {
+      const { lambda, v } = powerIterationSymmetricMatrix(B, 150);
+      vals.push(Math.max(0, lambda));
+      vecs.push(v.slice());
+      B = deflateSymmetric(B, lambda, v);
+    }
+    const pairs = vals.map((v, i) => ({ v, vec: vecs[i] })).sort((a, b) => b.v - a.v);
+    return { vals: pairs.map((x) => x.v), vecs: pairs.map((x) => x.vec) };
+  }
+
+  /**
+   * PCA on column-standardized data Z (n×p): correlation matrix R = Z'Z/(n−1), scores = Z V, loadings = correlations with PCs.
+   */
+  function pcaFromStandardizedZ(Z) {
+    const n = Z.length;
+    const p = Z[0].length;
+    if (p < 2) return null;
+    const Zt = matTranspose(Z);
+    const ZtZ = matMul(Zt, Z);
+    const denom = Math.max(1, n - 1);
+    const R = ZtZ.map((row) => row.map((x) => x / denom));
+    const { vals, vecs } = symmetricEigenAll(R);
+    const V = Array.from({ length: p }, (_, j) => Array.from({ length: p }, (_, k) => vecs[k][j]));
+    const scores = matMul(Z, V);
+    const loadings = Array.from({ length: p }, (_, j) =>
+      Array.from({ length: p }, (_, k) => Math.sqrt(Math.max(0, vals[k])) * V[j][k])
+    );
+    const totalVar = p;
+    const propPct = vals.map((v) => (v / totalVar) * 100);
+    const cumPct = [];
+    let acc = 0;
+    for (const pr of propPct) {
+      acc += pr;
+      cumPct.push(acc);
+    }
+    const cos2 = loadings.map((row) => ({
+      pc1: row[0] * row[0],
+      pc2: row[1] * row[1],
+      plane12: row[0] * row[0] + row[1] * row[1],
+    }));
+    return { vals, vecs, V, scores, loadings, propPct, cumPct, cos2, n, p, R };
   }
 
   /** SVD of interaction matrix I via I I' deflation; returns singular values and left/right vectors. */
@@ -1255,6 +2575,132 @@
     return Math.max(0, Math.min(1, x));
   }
 
+  /** Standardized path coefficients P = Rxx^{-1} rxy; indirect effects, reproduced r(i,Y), residual path. */
+  function computeStandardizedPathModel(Rxx, rxy) {
+    const inv = invertMatrix(Rxx);
+    if (!inv) return { ok: false, error: "singular" };
+    const P = matVecMul(inv, rxy);
+    const p = P.length;
+    const indirect = Array.from({ length: p }, () => Array(p).fill(0));
+    for (let i = 0; i < p; i++) {
+      for (let j = 0; j < p; j++) {
+        if (i === j) continue;
+        indirect[i][j] = Rxx[i][j] * P[j];
+      }
+    }
+    const reproduced = [];
+    let sum_rp = 0;
+    for (let i = 0; i < p; i++) {
+      let rep = P[i];
+      for (let j = 0; j < p; j++) if (i !== j) rep += Rxx[i][j] * P[j];
+      reproduced.push(rep);
+      sum_rp += rxy[i] * P[i];
+    }
+    const residual = Math.sqrt(clamp01(1 - sum_rp));
+    return { ok: true, P, indirect, reproduced, residual };
+  }
+
+  function pathInputsFromFullCorrelation(R, yIdx, predictorIdxs) {
+    const Rxx = predictorIdxs.map((i) => predictorIdxs.map((j) => R[i][j]));
+    const rxy = predictorIdxs.map((i) => R[i][yIdx]);
+    return { Rxx, rxy };
+  }
+
+  /** Mean trait vector per genotype label (plot-level rows). */
+  function aggregateTraitMeansByGenotype(rowLabels, X) {
+    const map = new Map();
+    for (let i = 0; i < X.length; i++) {
+      const key = String(rowLabels[i]);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(X[i]);
+    }
+    const labels = [];
+    const means = [];
+    for (const [g, rows] of map) {
+      labels.push(g);
+      const ncol = rows[0].length;
+      const mrow = Array(ncol).fill(0);
+      const nr = rows.length;
+      for (const r of rows) for (let j = 0; j < ncol; j++) mrow[j] += r[j];
+      for (let j = 0; j < ncol; j++) mrow[j] /= nr;
+      means.push(mrow);
+    }
+    return { labels, means };
+  }
+
+  function renderPathDiagramSvg(svgEl, { names, yName, pCoeffs, Rxx, rxy, residual }) {
+    if (!svgEl) return;
+    const svg = svgEl;
+    svg.innerHTML = "";
+    const uid = `${svg.id || "path"}-m`;
+    const W = 860;
+    const pCount = pCoeffs.length;
+    const spacing = pCount > 1 ? Math.min(70, 220 / Math.max(1, pCount - 1)) : 0;
+    const top = 70;
+    const xs = names.map((_, i) => ({ x: 120, y: top + i * spacing }));
+    const yMid = pCount ? top + ((pCount - 1) * spacing) / 2 : top;
+    const yNode = { x: 740, y: yMid };
+    const H = Math.max(360, top + 56 + Math.max(0, pCount - 1) * spacing);
+
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.insertAdjacentHTML(
+      "beforeend",
+      `<defs>
+          <marker id="${uid}-pArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+            <path d="M0,0 L10,5 L0,10 Z" fill="#d97706"></path>
+          </marker>
+          <marker id="${uid}-gArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+            <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"></path>
+          </marker>
+        </defs>`
+    );
+
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const r = Rxx[i][j];
+        if (Math.abs(r) < 0.2) continue;
+        const a = xs[i];
+        const b = xs[j];
+        svg.insertAdjacentHTML(
+          "beforeend",
+          `<path d="M ${a.x + 40} ${a.y} L ${b.x + 40} ${b.y}" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#${uid}-gArrow)"></path>
+             <text x="${a.x + 55}" y="${(a.y + b.y) / 2 - 6}" fill="#475569" font-size="12" font-weight="800">r=${r.toFixed(2)}</text>`
+        );
+      }
+    }
+
+    xs.forEach((pt, i) => {
+      svg.insertAdjacentHTML(
+        "beforeend",
+        `<rect x="${pt.x - 80}" y="${pt.y - 24}" width="160" height="48" rx="16" fill="rgba(13,148,136,0.12)" stroke="#c5cdd8"></rect>
+           <text x="${pt.x}" y="${pt.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="900">${qs(names[i])}</text>`
+      );
+    });
+    svg.insertAdjacentHTML(
+      "beforeend",
+      `<rect x="${yNode.x - 90}" y="${yNode.y - 26}" width="180" height="52" rx="16" fill="rgba(217,119,6,0.12)" stroke="#c5cdd8"></rect>
+         <text x="${yNode.x}" y="${yNode.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="950">${qs(yName)}</text>
+         <text x="${yNode.x}" y="${yNode.y + 32}" text-anchor="middle" fill="#64748b" font-size="12" font-weight="800">Residual=${residual.toFixed(3)}</text>`
+    );
+
+    xs.forEach((pt, i) => {
+      const p = pCoeffs[i];
+      const startX = pt.x + 80;
+      const startY = pt.y;
+      const endX = yNode.x - 90;
+      const endY = yNode.y + (i - (xs.length - 1) / 2) * 12;
+      const midX = (startX + endX) / 2;
+      const midY = (startY + endY) / 2;
+      const col = p >= 0 ? "#0d9488" : "#dc2626";
+      svg.insertAdjacentHTML(
+        "beforeend",
+        `<path d="M ${startX} ${startY} C ${startX + 110} ${startY}, ${endX - 120} ${endY}, ${endX} ${endY}" stroke="${col}" stroke-width="4" fill="none" marker-end="url(#${uid}-pArrow)"></path>
+           <text x="${midX}" y="${midY - 8}" fill="${col}" font-size="13" font-weight="950">p=${p.toFixed(3)}</text>
+           <text x="${midX}" y="${midY + 10}" fill="#64748b" font-size="12" font-weight="800">r=${rxy[i].toFixed(2)}</text>`
+      );
+    });
+  }
+
   function computeDiallelGeneticParams(msGCA, msSCA, modelKey = "fixed-with-reciprocal") {
     // Educational/proxy block for offline reporting.
     // The multipliers below provide model-aware scaling (still proxy-level, not a full mixed-model solver).
@@ -1281,23 +2727,228 @@
     return { sigmaGCA, sigmaSCA, ratio, sigmaA, sigmaD, degree, geneAction, modelLabel: scale.label };
   }
 
+  /** Griffing Method 4: half diallel (p(p−1)/2 crosses only, no parents). */
+  function griffingMethod4Partition(p, crosses) {
+    const n = (p * (p - 1)) / 2;
+    const Ti = Array(p).fill(0);
+    let idx = 0;
+    for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) Ti[i] += crosses[idx], Ti[j] += crosses[idx], idx++;
+    const T = Ti.reduce((a, b) => a + b, 0);
+    const xbar = T / n;
+    let ssTot = 0;
+    idx = 0;
+    for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) ssTot += (crosses[idx++] - xbar) ** 2;
+    const ssGCA =
+      (2 / (p * (p + 2))) * Ti.reduce((s, t) => s + t * t, 0) - (2 / (p * p * (p + 2))) * T * T;
+    const ssSCA = Math.max(0, ssTot - ssGCA);
+    const dfG = p - 1;
+    const dfS = (p * (p - 3)) / 2;
+    const dfT = n - 1;
+    const msG = dfG > 0 ? ssGCA / dfG : 0;
+    const msS = dfS > 0 ? ssSCA / dfS : 0;
+    const ratioMS = msS <= 1e-18 ? (msG <= 1e-18 ? 0 : Infinity) : msG / msS;
+    return { Ti, T, ssTot, ssGCA, ssSCA, dfG, dfS, dfT, n, xbar, msG, msS, ratioMS };
+  }
+
+  function estimateGcaScaMethod4(p, crosses) {
+    const n = (p * (p - 1)) / 2;
+    const Ti = Array(p).fill(0);
+    let idx = 0;
+    for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) Ti[i] += crosses[idx], Ti[j] += crosses[idx], idx++;
+    const T = Ti.reduce((a, b) => a + b, 0);
+    const mu = T / n;
+    const gca = Ti.map((_, i) => (1 / (p * (p + 2))) * ((p + 1) * Ti[i] - T));
+    const scaMat = Array.from({ length: p }, () => Array(p).fill(null));
+    idx = 0;
+    for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) {
+      const v = crosses[idx++];
+      const sca = v - mu - gca[i] - gca[j];
+      scaMat[i][j] = sca;
+      scaMat[j][i] = sca;
+    }
+    return { mu, gca, scaMat };
+  }
+
+  /** Variance components (random model, Method 4) + narrow- and broad-sense heritability on entry-mean scale. */
+  function diallelVarianceHeritability(msG, msS, mse, p, r) {
+    const rr = Math.max(1, r || 1);
+    const mseSafe = Number.isFinite(mse) && mse > 0 ? mse : msS * 0.25;
+    const sigmaGca = Math.max(0, (msG - msS) / (2 * p));
+    const sigmaSca = Math.max(0, (msS - mseSafe) / rr);
+    const sigmaE = mseSafe / rr;
+    const phen = 2 * sigmaGca + sigmaSca + sigmaE;
+    const hNarrow = phen <= 1e-18 ? 0 : (2 * sigmaGca) / phen;
+    const hBroad = phen <= 1e-18 ? 0 : (2 * sigmaGca + sigmaSca) / phen;
+    return { sigmaGca, sigmaSca, sigmaE, hNarrow, hBroad, mseUsed: mseSafe, mseImputed: !(Number.isFinite(mse) && mse > 0) };
+  }
+
+  /**
+   * Build symmetric half-diallel crosses vector (i<j) and reciprocal SS for Griffing Methods 1–3.
+   * @returns {{ crosses: number[], ssRecip: number, recipDf: number }}
+   */
+  function diallelSymmetricCrossesAndRecip(M, p) {
+    const crosses = [];
+    let ssRecip = 0;
+    let recipDf = 0;
+    for (let i = 0; i < p; i++) {
+      for (let j = i + 1; j < p; j++) {
+        const a = M[i][j];
+        const b = M[j][i];
+        const m = (a + b) / 2;
+        crosses.push(m);
+        const d = a - b;
+        ssRecip += 0.5 * d * d;
+        recipDf += 1;
+      }
+    }
+    return { crosses, ssRecip, recipDf };
+  }
+
+  /** Read p×p matrix from DA I inputs; apply Griffing method masking. */
+  function readDiallelMatrixFromDom(p, method) {
+    const M = Array.from({ length: p }, () => Array(p).fill(0));
+    for (let i = 0; i < p; i++) {
+      for (let j = 0; j < p; j++) {
+        const input = document.querySelector(`#da1GridWrap input[data-da1="i${i}j${j}"]`);
+        const v = Number(input?.value ?? NaN);
+        M[i][j] = Number.isFinite(v) ? v : 0;
+      }
+    }
+    if (method === 2) {
+      for (let i = 0; i < p; i++) for (let j = 0; j < i; j++) M[i][j] = M[j][i];
+    }
+    if (method === 4) {
+      for (let i = 0; i < p; i++) {
+        M[i][i] = 0;
+        for (let j = i + 1; j < p; j++) M[j][i] = M[i][j];
+      }
+    }
+    if (method === 3) {
+      for (let i = 0; i < p; i++) M[i][i] = 0;
+    }
+    return M;
+  }
+
+  function scaHeatmapHtml(scaMat, labels) {
+    const p = scaMat.length;
+    const vals = [];
+    for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) if (scaMat[i][j] != null && Number.isFinite(scaMat[i][j])) vals.push(scaMat[i][j]);
+    const vmax = Math.max(1e-12, ...vals.map((x) => Math.abs(x)));
+    const rows = [];
+    for (let i = 0; i < p; i++) {
+      const tds = [`<th class="border border-slate-700 bg-slate-900 px-2 py-1 text-left text-xs font-semibold text-slate-200">${qs(labels[i])}</th>`];
+      for (let j = 0; j < p; j++) {
+        const v = scaMat[i][j];
+        if (v == null || !Number.isFinite(v)) {
+          tds.push(`<td class="border border-slate-700 px-1 text-center text-xs text-slate-500">—</td>`);
+          continue;
+        }
+        const t = (v / vmax + 1) / 2;
+        const r0 = 220;
+        const g0 = 38;
+        const b0 = 38;
+        const r1 = 16;
+        const g1 = 185;
+        const b1 = 129;
+        const rr = Math.round(r0 + (r1 - r0) * t);
+        const gg = Math.round(g0 + (g1 - g0) * t);
+        const bb = Math.round(b0 + (b1 - b0) * t);
+        tds.push(
+          `<td class="border border-slate-700 px-1 py-0.5 text-center text-xs font-mono text-slate-900" style="background:rgba(${rr},${gg},${bb},0.72)">${v.toFixed(3)}</td>`
+        );
+      }
+      rows.push(`<tr>${tds.join("")}</tr>`);
+    }
+    const head = `<tr><th class="sticky left-0 z-10 border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-indigo-200">SCA</th>${labels
+      .map((n) => `<th class="border border-slate-700 bg-slate-900 px-2 py-2 text-xs font-semibold text-indigo-300">${qs(n)}</th>`)
+      .join("")}</tr>`;
+    return `<div class="overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/40"><table class="w-full border-collapse text-sm"><thead>${head}</thead><tbody>${rows.join("")}</tbody></table><p class="mt-2 text-xs text-slate-500">Colors: blue (negative SCA) → red (positive SCA); scale symmetric by max |SCA|.</p></div>`;
+  }
+
   // -----------------------------
   // UI components
   // -----------------------------
+  function highlightSidebarModule(moduleId) {
+    $$("#sidebar .tile").forEach((el) => {
+      el.classList.toggle("active", !!moduleId && el.dataset.module === moduleId);
+    });
+    const dash = $("#v2DashBtn");
+    if (dash) dash.classList.toggle("v2-nav-item--active", !moduleId);
+  }
+
+  function buildV2DashboardHtml() {
+    const cards = [
+      {
+        id: "ammi",
+        title: "AMMI analysis",
+        desc: "Analyze G×E interactions using IPCA scores and additive effects.",
+        status: "Stable",
+        beta: false,
+        hot: false,
+        icon: "▤",
+      },
+      {
+        id: "diallel",
+        title: "Diallel (Griffing)",
+        desc: "Estimate GCA and SCA for parental selection.",
+        status: "Stable",
+        beta: false,
+        hot: false,
+        icon: "◇",
+      },
+      {
+        id: "linetester",
+        title: "L × T analysis",
+        desc: "Performance evaluation across lines and testers.",
+        status: "Beta",
+        beta: true,
+        hot: true,
+        icon: "⊞",
+      },
+    ];
+    return `<div class="v2-dashboard-grid">${cards
+      .map(
+        (c) => `<div class="v2-dash-card" role="button" tabindex="0" data-open-module="${c.id}">
+      ${c.hot ? `<span class="v2-dash-hot">Hot</span>` : ""}
+      <div class="v2-d-ico" aria-hidden="true" style="font-size:28px;line-height:1">${c.icon}</div>
+      <h4>${qs(c.title)}</h4>
+      <p>${qs(c.desc)}</p>
+      <div class="v2-dash-meta">
+        <span><span class="dot ${c.beta ? "beta" : ""}"></span>${qs(c.status)}</span>
+        <span class="v2-dash-go">Start →</span>
+      </div>
+    </div>`
+      )
+      .join("")}</div>`;
+  }
+
+  function showV2Dashboard() {
+    CURRENT_MODULE_ID = "";
+    $("#contentHeader").innerHTML = `<div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap">
+      <div>
+        <h3>Overview</h3>
+        <p class="muted">Select a module card below or a tile in the sidebar to open full tables, plots, and interpretation.</p>
+      </div>
+    </div>`;
+    $("#contentBody").innerHTML = buildV2DataUploadPanelHtml() + buildV2DashboardHtml();
+    wireV2DashboardUpload();
+    highlightSidebarModule("");
+    $$("#contentBody .v2-dash-card[data-open-module]").forEach((el) => {
+      const id = el.dataset.openModule;
+      const go = () => openModule(id);
+      el.addEventListener("click", go);
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          go();
+        }
+      });
+    });
+  }
+
   function setSidebar(items) {
     const sidebar = $("#sidebar");
     sidebar.innerHTML = "";
-
-    const head = document.createElement("div");
-    head.className = "sidebar-head";
-    head.innerHTML = `
-      <div>
-        <div style="font-weight:950;font-size:13px;margin-bottom:2px">Modules</div>
-        <div class="muted small" id="sidebarSubtitle">Choose an analysis</div>
-      </div>
-      <span class="pill"><span class="dot ok"></span>Offline</span>
-    `;
-    sidebar.appendChild(head);
 
     const tiles = document.createElement("div");
     tiles.className = "module-tiles";
@@ -1319,6 +2970,7 @@
       });
       tiles.appendChild(btn);
     });
+    highlightSidebarModule(CURRENT_MODULE_ID);
   }
 
   function setActiveNav(group) {
@@ -1875,7 +3527,7 @@
   function exportProjectsJson() {
     const all = loadProjects();
     const blob = JSON.stringify(all, null, 2);
-    downloadBlob(`bkquant_projects_${new Date().toISOString().slice(0, 10)}.json`, blob, "application/json");
+    downloadBlob(`bkquant_projects_${new Date().toISOString().slice(0, 10)}.json`, "application/json", blob);
   }
 
   async function importProjectsJson(file) {
@@ -1935,7 +3587,7 @@
     // remove previously auto-generated captions to avoid duplication
     root.querySelectorAll("[data-auto-caption='1']").forEach((el) => el.remove());
 
-    const tables = Array.from(root.querySelectorAll("table.data"));
+    const tables = Array.from(root.querySelectorAll("table.data, table.corr-heatmap"));
     tables.forEach((table, idx) => {
       const prev = table.previousElementSibling;
       if (prev && prev.tagName === "H4" && !prev.dataset.autoCaption) return;
@@ -1978,9 +3630,10 @@
     `;
 
     CURRENT_MODULE_ID = moduleId;
+    highlightSidebarModule(moduleId);
     // bind exports
     $$("#contentBody [data-export]").forEach((b) => {
-      b.addEventListener("click", () => {
+      b.addEventListener("click", async () => {
         const type = b.dataset.export;
         const tableTitle = title;
         applyStandardTableCaptions("#contentBody");
@@ -1988,35 +3641,41 @@
           window.print();
           return;
         }
-        const interpret = $("#contentBody .export-interpretation")?.innerText || "";
-        // Export uses current page state.
-        if (type === "full") {
-          exportHtmlAsDocOrXls({
-            title: tableTitle,
-            moduleId,
-            filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.doc`,
-            asExcel: false,
-          });
-          exportHtmlAsDocOrXls({
-            title: tableTitle,
-            moduleId,
-            filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.xls`,
-            asExcel: true,
-          });
-        } else if (type === "doc") {
-          exportHtmlAsDocOrXls({
-            title: tableTitle,
-            moduleId,
-            filename: `${tableTitle.replace(/\s+/g, "_")}.doc`,
-            asExcel: false,
-          });
-        } else if (type === "xls") {
-          exportHtmlAsDocOrXls({
-            title: tableTitle,
-            moduleId,
-            filename: `${tableTitle.replace(/\s+/g, "_")}.xls`,
-            asExcel: true,
-          });
+        b.disabled = true;
+        const prev = b.textContent;
+        b.textContent = "Preparing export…";
+        try {
+          if (type === "full") {
+            await exportHtmlAsDocOrXls({
+              title: tableTitle,
+              moduleId,
+              filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.doc`,
+              asExcel: false,
+            });
+            await exportHtmlAsDocOrXls({
+              title: tableTitle,
+              moduleId,
+              filename: `${tableTitle.replace(/\s+/g, "_")}_Full_Report.xls`,
+              asExcel: true,
+            });
+          } else if (type === "doc") {
+            await exportHtmlAsDocOrXls({
+              title: tableTitle,
+              moduleId,
+              filename: `${tableTitle.replace(/\s+/g, "_")}.doc`,
+              asExcel: false,
+            });
+          } else if (type === "xls") {
+            await exportHtmlAsDocOrXls({
+              title: tableTitle,
+              moduleId,
+              filename: `${tableTitle.replace(/\s+/g, "_")}.xls`,
+              asExcel: true,
+            });
+          }
+        } finally {
+          b.disabled = false;
+          b.textContent = prev;
         }
       });
     });
@@ -2086,6 +3745,7 @@
     }
 
     // standardize table captions for consistent report layout
+    injectSessionUploadBanner(moduleId);
     applyStandardTableCaptions("#contentBody");
 
     return { prevComparison: deviationBanner(moduleId, payloadForPrevComparison?.storePrev || {}, prevCompareKeys) };
@@ -2103,7 +3763,8 @@
     const title = "CRD (Completely Randomized Design) - ANOVA";
     showContentHeader({
       title,
-      subtitle: "Input treatment values → ANOVA table, treatment means plot, and interpretation.",
+      subtitle:
+        "Homogeneous experimental units: SS partitioned into Treatments and pooled within-group error. Unequal replication uses Type III SS. Levene test for variance homogeneity; means, SEm, Fisher LSD (CD).",
     });
 
     const defaultT = 4;
@@ -2112,8 +3773,8 @@
     const bodyHtml = `
       <div class="kpi-row">
         <div class="kpi"><div class="label">Design type</div><div class="value">One-way CRD</div></div>
-        <div class="kpi"><div class="label">Assumption</div><div class="value">Equal replication</div></div>
-        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA + CD-ready means</div></div>
+        <div class="kpi"><div class="label">Partition</div><div class="value">Treatments + error</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA + Levene + LSD</div></div>
       </div>
 
       <div style="height:12px"></div>
@@ -2122,7 +3783,7 @@
         <div>
           <div class="section" style="margin:0">
             <h4>Input grid</h4>
-            <div class="muted small" style="margin-bottom:8px">Enter values by treatment (T1..T${defaultT}) and replicate (R1..R${defaultR}).</div>
+            <div class="muted small" style="margin-bottom:8px">Treatments (rows T1..T<sub>t</sub>), replicates (columns up to R<sub>max</sub>). Leave a cell empty to omit that replicate — unequal n is allowed. Each treatment needs ≥1 value; total N must exceed t for error df.</div>
             <div class="input-grid" id="crdControls">
               <div class="two-col">
                 <label>
@@ -2130,13 +3791,13 @@
                   <input type="number" min="2" id="crdT" value="${defaultT}" />
                 </label>
                 <label>
-                  Replicates (R)
+                  Max replicates (columns)
                   <input type="number" min="2" id="crdR" value="${defaultR}" />
                 </label>
               </div>
               <button class="action-btn primary2" type="button" id="crdBuild">Build grid</button>
               <div class="note" style="margin:0">
-                Tip: You can edit numbers directly after building.
+                Tip: Clear optional replicate cells for unequal n; Type III treatment SS is used automatically when counts differ.
               </div>
             </div>
             <div id="crdGridWrap" class="matrix" style="margin-top:12px"></div>
@@ -2214,42 +3875,58 @@
       clearValidation("#crdGridWrap");
       const errors = [];
 
-      const matrix = [];
+      const groups = [];
       for (let i = 0; i < t; i++) {
         const row = [];
         for (let j = 0; j < r; j++) {
           const input = document.querySelector(`#crdGridWrap input[data-cell="t${i}r${j}"]`);
-          const v = Number(input?.value ?? NaN);
+          const raw = (input?.value ?? "").trim();
+          if (raw === "") continue;
+          const v = Number(raw);
           if (!Number.isFinite(v)) {
             errors.push(`CRD: invalid numeric value at T${i + 1}, R${j + 1}`);
-            markInvalidInput(input, "Enter a valid numeric value");
-          }
-          row.push(Number.isFinite(v) ? v : 0);
+            markInvalidInput(input, "Enter a valid number or leave blank");
+          } else row.push(v);
         }
-        matrix.push(row);
+        groups.push(row);
       }
+      for (let i = 0; i < t; i++) {
+        if (groups[i].length < 1) errors.push(`CRD: treatment T${i + 1} has no observations.`);
+      }
+      const nTot = groups.reduce((s, g) => s + g.length, 0);
+      if (nTot - t < 1) errors.push("CRD: need total observations N ≥ t + 1 so pooled error has df ≥ 1.");
+
       if (shouldBlockForValidation("crd", errors, "#crdResultTop")) return;
 
-      const out = crdAnova(matrix, r);
-      const crdResiduals = [];
-      for (let i = 0; i < t; i++) for (let j = 0; j < r; j++) crdResiduals.push(matrix[i][j] - out.means[i].mean);
-      const crdDiag = residualSummary(crdResiduals);
-      const crdOut = outlierFlags(matrix.flat());
+      const out = crdAnovaOneWay(groups);
+      const lev = leveneTest(groups);
+      const pfmt = (pv) => (pv < 1e-4 ? "<0.0001" : Number(pv).toFixed(4));
 
-      // Results summary text
+      const crdResiduals = [];
+      for (let i = 0; i < t; i++) for (const v of groups[i]) crdResiduals.push(v - out.means[i].mean);
+      const crdDiag = residualSummary(crdResiduals);
+      const flatVals = groups.flat();
+      const crdOut = outlierFlags(flatVals);
+
+      const sems = out.means.map((m) => Math.sqrt(out.msError / m.n));
+      const nHarm = t / out.ns.reduce((s, ni) => s + 1 / ni, 0);
+
       $("#crdResultTop").innerHTML = `
-        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
-          <div class="kpi"><div class="label">F (Treat)</div><div class="value">${out.fStat.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">df(Treat), df(Error)</div><div class="value">${out.dfTreat}, ${out.dfError}</div></div>
-          <div class="kpi"><div class="label">Approx. significance</div><div class="value">${qs(out.sig.level)}</div></div>
-          <div class="kpi"><div class="label">MS Error</div><div class="value">${out.msError.toFixed(4)}</div></div><div class="kpi"><div class="label">Residual RMSE</div><div class="value">${crdDiag.rmse.toFixed(4)}</div></div>
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F (Treatments) / p</div><div class="value">${out.fStat.toFixed(4)} / ${pfmt(out.pTreat)}</div></div>
+          <div class="kpi"><div class="label">df (Treat, Error)</div><div class="value">${out.dfTreat}, ${out.dfError}</div></div>
+          <div class="kpi"><div class="label">MSE (pooled)</div><div class="value">${out.msError.toFixed(4)}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">Levene F / p</div><div class="value">${lev.fStat.toFixed(4)} / ${pfmt(lev.pTreat)}</div></div>
+          <div class="kpi"><div class="label">Replication</div><div class="value">${out.balanced ? `Balanced (n=${out.ns[0]})` : `Unbalanced (Type III SS)`}</div></div>
+          <div class="kpi"><div class="label">Residual RMSE</div><div class="value">${crdDiag.rmse.toFixed(4)}</div></div>
         </div>
       `;
 
-      // Bar chart of means
       const labels = out.means.map((m) => m.treatment);
       const values = out.means.map((m) => m.mean);
-      drawBarChart($("#crdBar"), labels, values, { title: "Treatment means" });
+      drawBarChartWithErrorBars($("#crdBar"), labels, values, sems, { title: "Treatment means ± SEm" });
       drawResidualMiniPlot($("#crdResidualPlot"), crdResiduals, "CRD residuals");
 
       const overallMeanCRD = mean(out.means.map((m) => m.mean));
@@ -2257,16 +3934,17 @@
         meanValue: overallMeanCRD,
         msGenotype: out.msTreat,
         msError: out.msError,
-        replications: r,
+        replications: nHarm,
+        dfError: out.dfError,
       });
       const summaryCRD = buildTable(
         ["Summary metric", "Value"],
         [
           ["Grand mean", overallMeanCRD],
           ["CV (%)", statsCRD.cv],
-          ["CD (5%)", statsCRD.cd5],
-          ["SEm", statsCRD.sem],
-          ["SEd", statsCRD.sed],
+          ["CD (5%) — equal-r shortcut", statsCRD.cd5],
+          ["SEm — equal-r shortcut", statsCRD.sem],
+          ["SEd — equal-r shortcut", statsCRD.sed],
           ["H2 (broad sense, %)", statsCRD.h2],
           ["GA", statsCRD.ga],
           ["GA (% of mean)", statsCRD.gaPct],
@@ -2284,24 +3962,47 @@
         ]
       );
 
-      // ANOVA table (full: SS, df, MS, F, approximate significance)
-      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
+      const meanDetail = buildTable(
+        ["Treatment", "n", "Mean", "SEm"],
+        out.means.map((m) => [m.treatment, m.n, m.mean, Math.sqrt(out.msError / m.n)])
+      );
+
+      const lsd5 = pairwiseFisherLsd(out.ns, out.msError, out.dfError, 0.05);
+      const lsd1 = pairwiseFisherLsd(out.ns, out.msError, out.dfError, 0.01);
+      const lsdRows = lsd5.map((p, idx) => [
+        `T${p.i + 1} vs T${p.j + 1}`,
+        p.lsd,
+        lsd1[idx] ? lsd1[idx].lsd : NaN,
+      ]);
+
+      const anovaNote = out.balanced
+        ? "Treatment SS equals standard between-groups SS (balanced)."
+        : "Unequal replication: treatment SS is Type III (marginal) for the factor — Σ T_i²/n_i − G²/N.";
+
+      const headers = ["Source", "SS", "df", "MS", "F", "p-value", "Sig. (approx.)"];
       const anovaRows = [
-        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fStat, out.sig.note],
-        ["Error", out.ssError, out.dfError, out.msError, "", ""],
-        ["Total", out.ssTotal, out.dfTreat + out.dfError, "", "", ""],
+        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fStat, pfmt(out.pTreat), out.sig.note],
+        ["Experimental error (within)", out.ssError, out.dfError, out.msError, "", "", ""],
+        ["Total", out.ssTotal, out.dfTreat + out.dfError, "", "", "", ""],
       ];
+      const leveneRows = [
+        ["Levene (|y − ȳᵢ|)", lev.ssTreat, lev.dfTreat, lev.msTreat, lev.fStat, pfmt(lev.pTreat), lev.sig.note],
+        ["Error", lev.ssError, lev.dfError, lev.msError, "", "", ""],
+        ["Total", lev.ssTotal, lev.dfTreat + lev.dfError, "", "", "", ""],
+      ];
+
       const qItemsCRD = [
         { check: "Valid numeric inputs", pass: errors.length === 0, note: errors.length ? "Some values were invalid." : "All numeric cells valid." },
-        { check: "Outlier load (IQR)", pass: crdOut.count <= Math.max(1, Math.floor(matrix.flat().length * 0.1)), note: `${crdOut.count} flagged observation(s).` },
-        { check: "Residual spread", pass: Number.isFinite(crdDiag.rmse) && crdDiag.rmse < Math.max(1e-9, Math.abs(mean(matrix.flat())) * 0.5), note: `RMSE=${crdDiag.rmse.toFixed(4)}` },
+        { check: "Levene homogeneity (α=0.05)", pass: lev.pTreat >= 0.05, note: `p≈${pfmt(lev.pTreat)} on z = |y−ȳᵢ|.` },
+        { check: "Outlier load (IQR)", pass: crdOut.count <= Math.max(1, Math.floor(flatVals.length * 0.1)), note: `${crdOut.count} flagged observation(s).` },
+        { check: "Residual spread", pass: Number.isFinite(crdDiag.rmse) && crdDiag.rmse < Math.max(1e-9, Math.abs(mean(flatVals)) * 0.5), note: `RMSE=${crdDiag.rmse.toFixed(4)}` },
       ];
       if (strictModeShouldBlock("crd", qItemsCRD, "#crdResultTop")) return;
-      $("#crdTableWrap").innerHTML = `${qualityScoreHtml(qItemsCRD)}<div style="height:10px"></div><h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryCRD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixCRD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
+      $("#crdTableWrap").innerHTML = `${qualityScoreHtml(qItemsCRD)}<div style="height:10px"></div><h4>Table 1. One-way ANOVA (CRD)</h4><div class="muted small" style="margin-bottom:6px">${qs(anovaNote)}</div>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Levene test (homogeneity of variance)</h4><div class="muted small" style="margin-bottom:6px">ANOVA on absolute deviations from treatment means. Non-significant p supports similar spread across groups.</div>${buildTable(headers, leveneRows)}<div style="height:10px"></div><h4>Table 3. Treatment means and SEm</h4><div class="muted small" style="margin-bottom:6px">SEm = √(MSE/n_i) using pooled MSE.</div>${meanDetail}<div style="height:10px"></div><h4>Table 4. Fisher LSD (CD) for pairwise mean differences</h4><div class="muted small" style="margin-bottom:6px">LSDα = tα/2,df(error) × √(MSE × (1/ni + 1/nj)).</div>${buildTable(["Contrast", "LSD (5%)", "LSD (1%)"], lsdRows)}<div style="height:10px"></div><h4>Table 5. Mean and genetic summary (harmonic mean n if unbalanced)</h4>${summaryCRD}<div style="height:10px"></div><h4>Table 6. PCV/GCV/ECV matrix</h4>${matrixCRD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 7. Assumption checklist", [
         { assumption: "Random allocation to treatments", status: "Required", note: "Prevents systematic treatment bias." },
         { assumption: "Independent residuals", status: "Assumed", note: "Serial/spatial trends affect precision." },
-        { assumption: "Variance homogeneity", status: "Assumed", note: "Large spread differences alter F reliability." },
-        { assumption: "Residual normality", status: "Assumed", note: "Important for strict parametric inference." }
+        { assumption: "Homogeneity of variance", status: lev.pTreat >= 0.05 ? "Levene: not rejected (approx.)" : "Levene: flagged", note: `F=${lev.fStat.toFixed(4)}, p≈${pfmt(lev.pTreat)}.` },
+        { assumption: "Residual normality", status: "Assumed", note: "Important for strict parametric inference." },
       ])}`;
 
       // Interpretation + deviation
@@ -2315,15 +4016,15 @@
       const best = sorted[0];
       const runnerUp = sorted[1];
       const interpretation =
-        `ANOVA in CRD tests whether treatment means differ beyond experimental error.\n` +
-        `Computed: F = ${out.fStat.toFixed(4)} with df(Treat)=${out.dfTreat}, df(Error)=${out.dfError}.\n` +
-        `Approx. significance: ${out.sig.note}.\n\n` +
-        `If treatments are significant, the highest mean indicates the best-performing treatment under your dataset.\n` +
-        `Top means: ${best.treatment} (mean=${best.mean.toFixed(3)})` +
-        (runnerUp ? `, followed by ${runnerUp.treatment} (mean=${runnerUp.mean.toFixed(3)}).` : ".") +
+        `One-way CRD: variation is split between treatments and pooled within-group (experimental) error only.\n` +
+        `F = ${out.fStat.toFixed(4)} (df₁=${out.dfTreat}, df₂=${out.dfError}), p ≈ ${pfmt(out.pTreat)}; ${out.sig.note}.\n` +
+        `${out.balanced ? "Balanced replication." : "Unbalanced replication — treatment SS uses Type III (marginal) SS for the factor."}\n\n` +
+        `Levene test: F = ${lev.fStat.toFixed(4)}, p ≈ ${pfmt(lev.pTreat)} (${lev.pTreat >= 0.05 ? "homogeneity of variance not rejected at 5% (approx.)" : "consider variance-stabilizing transforms or robust methods"}).\n\n` +
+        `Ranking by mean: ${best.treatment} (${best.mean.toFixed(3)})` +
+        (runnerUp ? `; next ${runnerUp.treatment} (${runnerUp.mean.toFixed(3)}).` : ".") +
         `\n\n` +
-        `Genetic summary: H2=${statsCRD.h2.toFixed(2)}%, GA=${statsCRD.ga.toFixed(3)}, PCV=${statsCRD.pcv.toFixed(2)}%, GCV=${statsCRD.gcv.toFixed(2)}%, ECV=${statsCRD.ecv.toFixed(2)}%.\n\n` +
-        `Note: This offline BKQuant demo uses an approximate significance rule (no full t/F distribution table). For formal reporting, use standard CRD F-tables or statistical software.`;
+        `Pairwise comparisons: use Table 4 (Fisher LSD). Genetic summary uses harmonic mean n = ${nHarm.toFixed(2)} when replications differ.\n\n` +
+        `p-values use F/t via jStat when available; otherwise they may read as 1.0 — verify with external software for publication.`;
 
       setInterpretation(
         "crd",
@@ -2331,7 +4032,13 @@
         deviationHtml ? deviationHtml : "",
         { fStat: out.fStat, msError: out.msError, ssTreat: out.ssTreat, ssError: out.ssError }
       );
-      setRunMeta("crd", { forceRun: isForceRunEnabled(), inputSize: `t=${t}, r=${r}`, standardization: "none", preprocessing: "No truncation; raw CRD cell values used.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsCRD.map((x) => x.pass ? 100 : 45)))))} / 100` });
+      setRunMeta("crd", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `t=${t}, n=${JSON.stringify(out.ns)}`,
+        standardization: "none",
+        preprocessing: out.balanced ? "Balanced CRD." : "Unbalanced CRD; Type III treatment SS.",
+        qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsCRD.map((x) => x.pass ? 100 : 45)))))} / 100`,
+      });
     });
   }
 
@@ -2340,7 +4047,8 @@
     const title = "RBD (Randomized Block Design) - ANOVA";
     showContentHeader({
       title,
-      subtitle: "Input treatments across blocks → ANOVA table, means plot, and interpretation.",
+      subtitle:
+        "Partition SS into treatments, replication (blocks), and experimental error; F-test vs tabulated critical values (5% & 1%); CV%, SEm, CD/LSD; bar plot of means with ±SEm.",
     });
 
     const defaultT = 4;
@@ -2350,7 +4058,7 @@
       <div class="kpi-row">
         <div class="kpi"><div class="label">Design type</div><div class="value">One-way RBD</div></div>
         <div class="kpi"><div class="label">Blocking</div><div class="value">Field/environment gradient control</div></div>
-        <div class="kpi"><div class="label">Outputs</div><div class="value">Treatments + Blocks ANOVA</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA + F + CV / SEm / CD</div></div>
       </div>
 
       <div style="height:12px"></div>
@@ -2359,7 +4067,7 @@
         <div>
           <div class="section" style="margin:0">
             <h4>Input grid</h4>
-            <div class="muted small" style="margin-bottom:8px">Enter values by treatment (T1..T${defaultT}) and block (B1..B${defaultB}).</div>
+            <div class="muted small" style="margin-bottom:8px">Rows = treatments, columns = blocks (replications). Total SS is partitioned into <strong>Treatments</strong>, <strong>Replication (blocks)</strong>, and <strong>Experimental error</strong>.</div>
             <div class="input-grid" id="rbdControls">
               <div class="two-col">
                 <label>
@@ -2465,49 +4173,79 @@
       if (shouldBlockForValidation("rbd", errors, "#rbdResultTop")) return;
 
       const out = rbdAnova(matrix, b, t);
+      const N = t * b;
+      const grandMean = matrix.flat().reduce((a, v) => a + v, 0) / N;
+      const blockMeans = [];
+      for (let j = 0; j < b; j++) {
+        let s = 0;
+        for (let i = 0; i < t; i++) s += matrix[i][j];
+        blockMeans.push(s / t);
+      }
       const rbdResiduals = [];
-      for (let i = 0; i < t; i++) for (let j = 0; j < b; j++) rbdResiduals.push(matrix[i][j] - out.means[i].mean);
+      for (let i = 0; i < t; i++) {
+        for (let j = 0; j < b; j++) {
+          rbdResiduals.push(matrix[i][j] - out.means[i].mean - blockMeans[j] + grandMean);
+        }
+      }
       const rbdDiag = residualSummary(rbdResiduals);
       const rbdOut = outlierFlags(matrix.flat());
 
+      const fTreatP = fPValueUpperTail(out.fTreat, out.dfTreat, out.dfError);
+      const fCrit5 = fCriticalUpperTail(0.05, out.dfTreat, out.dfError);
+      const fCrit1 = fCriticalUpperTail(0.01, out.dfTreat, out.dfError);
+      const sigTreat5 = out.fTreat > fCrit5;
+      const sigTreat1 = out.fTreat > fCrit1;
+
       $("#rbdResultTop").innerHTML = `
-        <div class="kpi-row" style="grid-template-columns:repeat(6, minmax(0,1fr))">
-          <div class="kpi"><div class="label">F (Treat)</div><div class="value">${out.fTreat.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">df(Treat), df(Block)</div><div class="value">${out.dfTreat}, ${out.dfBlock}</div></div>
-          <div class="kpi"><div class="label">df(Error)</div><div class="value">${out.dfError}</div></div>
-          <div class="kpi"><div class="label">Approx. significance</div><div class="value">${qs(out.sig.level)}</div></div>
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F (Treatments)</div><div class="value">${out.fTreat.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">p-value (upper tail)</div><div class="value">${fTreatP < 1e-4 ? "<0.0001" : fTreatP.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F crit (5% / 1%)</div><div class="value">${fCrit5.toFixed(3)} / ${fCrit1.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Significant?</div><div class="value">${sigTreat1 ? "Yes @1%" : sigTreat5 ? "Yes @5%" : "No @5%"}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">df Treat / Block / Error</div><div class="value">${out.dfTreat}, ${out.dfBlock}, ${out.dfError}</div></div>
           <div class="kpi"><div class="label">MS Error</div><div class="value">${out.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Approx. sig. (legacy)</div><div class="value">${qs(out.sig.note)}</div></div>
           <div class="kpi"><div class="label">Residual RMSE</div><div class="value">${rbdDiag.rmse.toFixed(4)}</div></div>
         </div>
       `;
 
       const labels = out.means.map((m) => m.treatment);
       const values = out.means.map((m) => m.mean);
-      drawBarChart($("#rbdBar"), labels, values, { title: "Treatment means (over blocks)" });
-      drawResidualMiniPlot($("#rbdResidualPlot"), rbdResiduals, "RBD residuals");
-
-      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
-      const anovaRows = [
-        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fTreat, out.sig.note],
-        ["Blocks", out.ssBlock, out.dfBlock, out.msBlock, out.fBlock, out.sigBlock.note],
-        ["Error", out.ssError, out.dfError, out.msError, "", ""],
-        ["Total", out.ssTotal, out.dfTreat + out.dfBlock + out.dfError, "", "", ""],
-      ];
-      const overallMeanRBD = mean(out.means.map((m) => m.mean));
+      const overallMeanRBD = mean(values);
       const statsRBD = computeBreedingSummaryStats({
         meanValue: overallMeanRBD,
         msGenotype: out.msTreat,
         msError: out.msError,
         replications: b,
+        dfError: out.dfError,
       });
+      const semEach = values.map(() => statsRBD.sem);
+      drawBarChartWithErrorBars($("#rbdBar"), labels, values, semEach, {
+        title: "Treatment means with ± SEm error bars",
+      });
+      drawResidualMiniPlot($("#rbdResidualPlot"), rbdResiduals, "RBD residuals (additive model)");
+
+      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
+      const anovaRows = [
+        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fTreat, out.sig.note],
+        ["Replication (blocks)", out.ssBlock, out.dfBlock, out.msBlock, out.fBlock, out.sigBlock.note],
+        ["Experimental error", out.ssError, out.dfError, out.msError, "", ""],
+        ["Total", out.ssTotal, out.dfTreat + out.dfBlock + out.dfError, "", "", ""],
+      ];
+      const fTestRows = [
+        ["Treatments", out.dfTreat, out.dfError, out.fTreat, fCrit5, fCrit1, fTreatP, sigTreat5 ? "Yes" : "No", sigTreat1 ? "Yes" : "No"],
+      ];
       const summaryRBD = buildTable(
         ["Summary metric", "Value"],
         [
           ["Grand mean", overallMeanRBD],
           ["CV (%)", statsRBD.cv],
-          ["CD (5%)", statsRBD.cd5],
-          ["SEm", statsRBD.sem],
-          ["SEd", statsRBD.sed],
+          ["SEm (±)", statsRBD.sem],
+          ["SEd (standard error of difference)", statsRBD.sed],
+          ["CD / LSD (5%)", statsRBD.cd5],
+          ["CD / LSD (1%)", statsRBD.cd1],
           ["H2 (broad sense, %)", statsRBD.h2],
           ["GA", statsRBD.ga],
           ["GA (% of mean)", statsRBD.gaPct],
@@ -2530,7 +4268,10 @@
         { check: "Residual spread", pass: Number.isFinite(rbdDiag.rmse) && rbdDiag.rmse < Math.max(1e-9, Math.abs(mean(matrix.flat())) * 0.5), note: `RMSE=${rbdDiag.rmse.toFixed(4)}` },
       ];
       if (strictModeShouldBlock("rbd", qItemsRBD, "#rbdResultTop")) return;
-      $("#rbdTableWrap").innerHTML = `${qualityScoreHtml(qItemsRBD)}<div style="height:10px"></div><h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryRBD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixRBD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
+      $("#rbdTableWrap").innerHTML = `${qualityScoreHtml(qItemsRBD)}<div style="height:10px"></div><h4>Table 1. ANOVA — partitioned variance</h4>${buildTable(headers, anovaRows      )}<div style="height:10px"></div><h4>Table 2. F-test for treatments (vs F distribution at 5% and 1%)</h4>${buildTable(
+        ["Source", "df (num)", "df (den)", "F observed", "F crit (α=0.05)", "F crit (α=0.01)", "p-value (upper tail)", "Significant @5%?", "Significant @1%?"],
+        fTestRows
+      )}<div style="height:10px"></div><h4>Table 3. Mean comparisons (CV%, SEm, CD/LSD)</h4>${summaryRBD}<div style="height:10px"></div><h4>Table 4. PCV/GCV/ECV matrix</h4>${matrixRBD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 5. Assumption checklist", [
         { assumption: "Randomization within blocks", status: "Required", note: "Essential for unbiased treatment comparison." },
         { assumption: "Homogeneous residual variance", status: "Assumed", note: "Large heterogeneity affects F tests." },
         { assumption: "Independent errors", status: "Assumed", note: "Spatial dependence can bias standard errors." },
@@ -2547,15 +4288,18 @@
       const best = sorted[0];
       const runnerUp = sorted[1];
       const interpretation =
-        `ANOVA in RBD partitions variability into treatments, blocks, and error.\n` +
-        `Computed: F(treatments) = ${out.fTreat.toFixed(4)} with df(T)=${out.dfTreat}, df(Error)=${out.dfError}.\n` +
-        `Approx. significance: ${out.sig.note}.\n\n` +
-        `If block effects exist, it usually appears as smaller error MS and more reliable treatment testing.\n` +
-        `Highest mean: ${best.treatment} (mean=${best.mean.toFixed(3)})` +
-        (runnerUp ? `, second: ${runnerUp.treatment} (mean=${runnerUp.mean.toFixed(3)}).` : ".") +
+        `RBD ANOVA partitions total SS into treatments, replication (blocks), and experimental error.\n` +
+        `Treatment test: F = ${out.fTreat.toFixed(4)} on df₁=${out.dfTreat}, df₂=${out.dfError}; ` +
+        `upper-tail p ≈ ${fTreatP < 1e-4 ? "<0.0001" : fTreatP.toFixed(4)}. ` +
+        `Critical values: F (5%) = ${fCrit5.toFixed(3)}, F (1%) = ${fCrit1.toFixed(3)} → ` +
+        `${sigTreat1 ? "significant at 1%" : sigTreat5 ? "significant at 5% only" : "not significant at 5%"}.\n\n` +
+        `Mean precision: CV% = ${statsRBD.cv.toFixed(2)}%, SEm = ${statsRBD.sem.toFixed(4)}, ` +
+        `CD (LSD) at 5% = ${statsRBD.cd5.toFixed(4)}, at 1% = ${statsRBD.cd1.toFixed(4)} (based on SEd and t on df(error)).\n\n` +
+        `Highest mean: ${best.treatment} (${best.mean.toFixed(3)})` +
+        (runnerUp ? `; second: ${runnerUp.treatment} (${runnerUp.mean.toFixed(3)}).` : ".") +
         `\n\n` +
-        `Genetic summary: H2=${statsRBD.h2.toFixed(2)}%, GA=${statsRBD.ga.toFixed(3)}, PCV=${statsRBD.pcv.toFixed(2)}%, GCV=${statsRBD.gcv.toFixed(2)}%, ECV=${statsRBD.ecv.toFixed(2)}%.\n\n` +
-        `BKQuant note: significance uses approximate thresholds for offline demo purposes. Use official F tables/software for exact p-values.`;
+        `H² = ${statsRBD.h2.toFixed(2)}%, PCV/GCV/ECV = ${statsRBD.pcv.toFixed(2)} / ${statsRBD.gcv.toFixed(2)} / ${statsRBD.ecv.toFixed(2)}%.\n` +
+        `Bar chart error bars show ±1 SEm per treatment mean.`;
 
       setInterpretation(
         "rbd",
@@ -2567,12 +4311,295 @@
     });
   }
 
+  /** Fisher's LSD / CD for comparing two equal-n means: t(dfError) * sqrt(2*MSE/n), where n = observations per mean. */
+  function lsdTwoMeans(mse, dfError, nPerMean, alphaTwoTail) {
+    if (dfError <= 0 || nPerMean <= 0) return { t: NaN, sed: NaN, cd: NaN };
+    const t = studentTInvTwoTail(dfError, alphaTwoTail);
+    const sed = Math.sqrt((2 * mse) / nPerMean);
+    return { t, sed, cd: t * sed };
+  }
+
+  /**
+   * Simple effects of Factor A at each level of B (balanced factorial RBD).
+   * SS(A|B_j) = r * Σ_i (ȳ_ij − ȳ_.j)² with ȳ_.j = mean of cell means at B_j; F = MS / MSE from full model.
+   */
+  function factorialSimpleEffectsAatB(T_ij, a, b, r, msError, dfError) {
+    const rows = [];
+    for (let j = 0; j < b; j++) {
+      const cellMeans = [];
+      for (let i = 0; i < a; i++) cellMeans.push(T_ij[i][j] / r);
+      const ybarDotJ = cellMeans.reduce((s, m) => s + m, 0) / a;
+      let ss = 0;
+      for (let i = 0; i < a; i++) ss += r * (cellMeans[i] - ybarDotJ) ** 2;
+      const df = a - 1;
+      const ms = df > 0 ? ss / df : 0;
+      const f = msError > 0 ? ms / msError : 0;
+      const p = fPValueUpperTail(f, df, dfError);
+      rows.push({ j, cellMeans, ybarDotJ, ss, df, ms, f, p });
+    }
+    return rows;
+  }
+
+  /** Linear interpolation for Tukey q table lookup. */
+  function _interp1dLin(x, xs, ys) {
+    if (!xs.length) return NaN;
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[xs.length - 1]) return ys[ys.length - 1];
+    let i = 0;
+    while (i < xs.length - 1 && xs[i + 1] < x) i++;
+    const t = (x - xs[i]) / (xs[i + 1] - xs[i]);
+    return ys[i] * (1 - t) + ys[i + 1] * t;
+  }
+
+  /**
+   * Studentized range q for Tukey HSD at α ≈ 0.05 (balanced ANOVA).
+   * Bilinear interpolation on standard tables (Montgomery-style); k = number of means, df = error df.
+   */
+  function qTukeyStudentizedRange05(kMeans, dfError) {
+    const df = Math.max(2, dfError);
+    const kRaw = Math.max(2, Number(kMeans));
+    const kGrid = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
+    const dfGrid = [5, 10, 20, 60, 120, 1000000];
+    /** Rows = error df index; columns = k (number of means). */
+    const Q = [
+      [3.64, 4.6, 5.22, 5.67, 6.03, 6.63, 7.12, 7.59, 7.91, 8.21],
+      [3.15, 3.88, 4.33, 4.65, 4.91, 5.27, 5.56, 5.84, 6.08, 6.28],
+      [2.95, 3.58, 3.96, 4.23, 4.45, 4.8, 5.08, 5.33, 5.54, 5.74],
+      [2.83, 3.4, 3.74, 3.98, 4.16, 4.44, 4.68, 4.89, 5.08, 5.25],
+      [2.8, 3.36, 3.68, 3.92, 4.1, 4.37, 4.6, 4.81, 4.99, 5.16],
+      [2.77, 3.31, 3.63, 3.86, 4.03, 4.28, 4.5, 4.69, 4.86, 5.02],
+    ];
+    function qAtK(k) {
+      let k0 = 0;
+      while (k0 < kGrid.length - 1 && kGrid[k0 + 1] < k) k0++;
+      const kLo = kGrid[k0];
+      const kHi = kGrid[Math.min(k0 + 1, kGrid.length - 1)];
+      const colLo = Math.min(k0, Q[0].length - 1);
+      const colHi = Math.min(k0 + 1, Q[0].length - 1);
+      const qAtCol = (col) => {
+        const colVals = Q.map((row) => row[col]);
+        return _interp1dLin(df, dfGrid, colVals);
+      };
+      if (kLo === kHi || colLo === colHi) return qAtCol(colLo);
+      const qL = qAtCol(colLo);
+      const qH = qAtCol(colHi);
+      const tk = (k - kLo) / (kHi - kLo);
+      return qL * (1 - tk) + qH * tk;
+    }
+    if (kRaw <= 20) return qAtK(kRaw);
+    const q20 = qAtK(20);
+    const q15 = qAtK(15);
+    return q20 + ((q20 - q15) / 5) * (kRaw - 20);
+  }
+
+  /** Tukey HSD for comparing all pairs among k means, each based on n independent observations (balanced). */
+  function tukeyHsd(mse, dfError, nPerMean, kMeans) {
+    const q = qTukeyStudentizedRange05(kMeans, dfError);
+    if (!Number.isFinite(q) || !Number.isFinite(mse) || mse <= 0 || nPerMean <= 0) return { q: NaN, hsd: NaN };
+    return { q, hsd: q * Math.sqrt(mse / nPerMean) };
+  }
+
+  function pctOfTotal(ss, ssTot) {
+    return ssTot > 1e-15 ? (100 * ss) / ssTot : 0;
+  }
+
+  /**
+   * Balanced A×B×C factorial in RBD: matrix rows = lexicographic (A,B,C) combinations, cols = blocks (r).
+   * Returns SS partition, F-tests, cell totals T[i][j][k], and marginal means for tables.
+   */
+  function threeWayFactorialRbdAnova(matrix, a, b, c, r) {
+    const T = Array.from({ length: a }, () => Array.from({ length: b }, () => Array(c).fill(0)));
+    let p = 0;
+    for (let i = 0; i < a; i++) {
+      for (let j = 0; j < b; j++) {
+        for (let k = 0; k < c; k++) {
+          let s = 0;
+          for (let rep = 0; rep < r; rep++) s += matrix[p][rep];
+          T[i][j][k] = s;
+          p++;
+        }
+      }
+    }
+    const N = a * b * c * r;
+    let sumY2 = 0;
+    let grandTotal = 0;
+    for (let ii = 0; ii < a * b * c; ii++) for (let rep = 0; rep < r; rep++) {
+      const v = matrix[ii][rep];
+      sumY2 += v * v;
+      grandTotal += v;
+    }
+    const CF = (grandTotal * grandTotal) / N;
+    const ssTotal = sumY2 - CF;
+
+    const Block_totals = Array(r).fill(0);
+    p = 0;
+    for (let i = 0; i < a; i++) {
+      for (let j = 0; j < b; j++) {
+        for (let k = 0; k < c; k++) {
+          for (let rep = 0; rep < r; rep++) Block_totals[rep] += matrix[p][rep];
+          p++;
+        }
+      }
+    }
+    let ssBlock = 0;
+    for (let rep = 0; rep < r; rep++) ssBlock += (Block_totals[rep] * Block_totals[rep]) / (a * b * c);
+    ssBlock -= CF;
+
+    let ssTreat = 0;
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) ssTreat += (T[i][j][k] * T[i][j][k]) / r;
+    ssTreat -= CF;
+
+    const A_tot = Array(a).fill(0);
+    const B_tot = Array(b).fill(0);
+    const C_tot = Array(c).fill(0);
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) {
+      const v = T[i][j][k];
+      A_tot[i] += v;
+      B_tot[j] += v;
+      C_tot[k] += v;
+    }
+
+    let ssA = 0;
+    for (let i = 0; i < a; i++) ssA += (A_tot[i] * A_tot[i]) / (b * c * r);
+    ssA -= CF;
+    let ssB = 0;
+    for (let j = 0; j < b; j++) ssB += (B_tot[j] * B_tot[j]) / (a * c * r);
+    ssB -= CF;
+    let ssC = 0;
+    for (let k = 0; k < c; k++) ssC += (C_tot[k] * C_tot[k]) / (a * b * r);
+    ssC -= CF;
+
+    const AB = Array.from({ length: a }, () => Array(b).fill(0));
+    const AC = Array.from({ length: a }, () => Array(c).fill(0));
+    const BC = Array.from({ length: b }, () => Array(c).fill(0));
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) {
+      const v = T[i][j][k];
+      AB[i][j] += v;
+      AC[i][k] += v;
+      BC[j][k] += v;
+    }
+
+    let ssABsub = 0;
+    for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) ssABsub += (AB[i][j] * AB[i][j]) / (c * r);
+    ssABsub -= CF;
+    let ssACsub = 0;
+    for (let i = 0; i < a; i++) for (let k = 0; k < c; k++) ssACsub += (AC[i][k] * AC[i][k]) / (b * r);
+    ssACsub -= CF;
+    let ssBCsub = 0;
+    for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) ssBCsub += (BC[j][k] * BC[j][k]) / (a * r);
+    ssBCsub -= CF;
+
+    const ssAB = ssABsub - ssA - ssB;
+    const ssAC = ssACsub - ssA - ssC;
+    const ssBC = ssBCsub - ssB - ssC;
+    let ssABC = ssTreat - ssA - ssB - ssC - ssAB - ssAC - ssBC;
+    if (ssABC < 0 && ssABC > -1e-8) ssABC = 0;
+
+    const ssError = ssTotal - ssBlock - ssTreat;
+    const dfBlock = r - 1;
+    const dfA = a - 1;
+    const dfB = b - 1;
+    const dfC = c - 1;
+    const dfAB = (a - 1) * (b - 1);
+    const dfAC = (a - 1) * (c - 1);
+    const dfBC = (b - 1) * (c - 1);
+    const dfABC = (a - 1) * (b - 1) * (c - 1);
+    const dfTreat = a * b * c - 1;
+    const dfError = (a * b * c - 1) * (r - 1);
+    const dfTotal = N - 1;
+
+    const msBlock = ssBlock / dfBlock;
+    const msA = ssA / dfA;
+    const msB = ssB / dfB;
+    const msC = ssC / dfC;
+    const msAB = ssAB / dfAB;
+    const msAC = ssAC / dfAC;
+    const msBC = ssBC / dfBC;
+    const msABC = ssABC / dfABC;
+    const msError = ssError / dfError;
+
+    const fBlock = msError > 0 ? msBlock / msError : 0;
+    const fA = msError > 0 ? msA / msError : 0;
+    const fB = msError > 0 ? msB / msError : 0;
+    const fC = msError > 0 ? msC / msError : 0;
+    const fAB = msError > 0 ? msAB / msError : 0;
+    const fAC = msError > 0 ? msAC / msError : 0;
+    const fBC = msError > 0 ? msBC / msError : 0;
+    const fABC = msError > 0 ? msABC / msError : 0;
+
+    const pBlock = fPValueUpperTail(fBlock, dfBlock, dfError);
+    const pA = fPValueUpperTail(fA, dfA, dfError);
+    const pB = fPValueUpperTail(fB, dfB, dfError);
+    const pC = fPValueUpperTail(fC, dfC, dfError);
+    const pAB = fPValueUpperTail(fAB, dfAB, dfError);
+    const pAC = fPValueUpperTail(fAC, dfAC, dfError);
+    const pBC = fPValueUpperTail(fBC, dfBC, dfError);
+    const pABC = fPValueUpperTail(fABC, dfABC, dfError);
+
+    return {
+      ssTotal,
+      ssBlock,
+      ssTreat,
+      ssA,
+      ssB,
+      ssC,
+      ssAB,
+      ssAC,
+      ssBC,
+      ssABC,
+      ssError,
+      dfBlock,
+      dfA,
+      dfB,
+      dfC,
+      dfAB,
+      dfAC,
+      dfBC,
+      dfABC,
+      dfError,
+      dfTotal,
+      msBlock,
+      msA,
+      msB,
+      msC,
+      msAB,
+      msAC,
+      msBC,
+      msABC,
+      msError,
+      fBlock,
+      fA,
+      fB,
+      fC,
+      fAB,
+      fAC,
+      fBC,
+      fABC,
+      pBlock,
+      pA,
+      pB,
+      pC,
+      pAB,
+      pAC,
+      pBC,
+      pABC,
+      T,
+      AB,
+      AC,
+      BC,
+      A_tot,
+      B_tot,
+      C_tot,
+    };
+  }
+
   // --- Factorial RBD (A×B in blocks) ---
   function renderFactorial() {
     const title = "Factorial RBD (Two-way A×B) - ANOVA";
     showContentHeader({
       title,
-      subtitle: "Input Factor A × Factor B across blocks → ANOVA for A, B, A×B, block effects, means and plots.",
+      subtitle:
+        "Partition SS into replications, A, B, A×B, and error; F-tests; CD for main effects and for A×B cells; simple effects of A within each B when interaction is significant.",
     });
 
     const defaultA = 2;
@@ -2782,6 +4809,7 @@
       const msBlock = ssBlock / dfBlock;
       const msError = ssError / dfError;
 
+      const fBlock = msError === 0 ? 0 : msBlock / msError;
       const fA = msError === 0 ? 0 : msA / msError;
       const fB = msError === 0 ? 0 : msB / msError;
       const fAB = msError === 0 ? 0 : msAB / msError;
@@ -2789,6 +4817,19 @@
       const sigA = approxFSignificance(fA, dfA, dfError);
       const sigB = approxFSignificance(fB, dfB, dfError);
       const sigAB = approxFSignificance(fAB, dfAB, dfError);
+
+      const pBlock = fPValueUpperTail(fBlock, dfBlock, dfError);
+      const pA = fPValueUpperTail(fA, dfA, dfError);
+      const pB = fPValueUpperTail(fB, dfB, dfError);
+      const pAB = fPValueUpperTail(fAB, dfAB, dfError);
+      const pfmt = (p) => (p < 1e-4 ? "<0.0001" : Number(p).toFixed(4));
+
+      const lsdA5 = lsdTwoMeans(msError, dfError, b * r, 0.05);
+      const lsdA1 = lsdTwoMeans(msError, dfError, b * r, 0.01);
+      const lsdB5 = lsdTwoMeans(msError, dfError, a * r, 0.05);
+      const lsdB1 = lsdTwoMeans(msError, dfError, a * r, 0.01);
+      const lsdCell5 = lsdTwoMeans(msError, dfError, r, 0.05);
+      const lsdCell1 = lsdTwoMeans(msError, dfError, r, 0.01);
 
       // Means for each combination
       const comboMeans = [];
@@ -2799,43 +4840,107 @@
         }
       }
 
+      const simpleAatB = factorialSimpleEffectsAatB(T_ij, a, b, r, msError, dfError);
+      const interactionSig05 = pAB < 0.05;
+
+      let simpleEffectsHtml = "";
+      if (interactionSig05) {
+        const parts = [];
+        for (const row of simpleAatB) {
+          const meanRows = row.cellMeans.map((m, ii) => [`A${ii + 1}`, m]);
+          parts.push(
+            `<div class="muted small" style="margin-top:10px"><strong>Within B${row.j + 1}</strong> — test of A simple effect: F = ${row.f.toFixed(4)} (df num = ${row.df}, df error = ${dfError}), p = ${pfmt(row.p)}. ` +
+              `Pairwise comparison of any two A means at this B uses the A×B cell CD (LSD, n = ${r} per mean).</div>` +
+              buildTable(["A level", `Mean (B${row.j + 1})`], meanRows)
+          );
+        }
+        simpleEffectsHtml = `<h4>Table 5. Simple effects — Factor A within each level of Factor B</h4>` + parts.join("");
+      } else {
+        simpleEffectsHtml = `<h4>Table 5. Simple effects (Factor A within B)</h4><div class="note" style="margin-top:6px">A×B interaction is not significant at α = 0.05 (p = ${pfmt(
+          pAB
+        )}). Simple effects analysis is usually reported only when interaction is significant; values below are available if you still need them.</div>${simpleAatB
+          .map((row) => {
+            const meanRows = row.cellMeans.map((m, ii) => [`A${ii + 1}`, m]);
+            return `<div class="muted small" style="margin-top:8px"><strong>B${row.j + 1}</strong> F = ${row.f.toFixed(4)}, p = ${pfmt(row.p)}</div>${buildTable(
+              ["A level", "Mean"],
+              meanRows
+            )}`;
+          })
+          .join("")}`;
+      }
+
       $("#factResultTop").innerHTML = `
         <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
-          <div class="kpi"><div class="label">F (A)</div><div class="value">${fA.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">F (B)</div><div class="value">${fB.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">F (A×B)</div><div class="value">${fAB.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">MS Error</div><div class="value">${msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F (A), p</div><div class="value">${fA.toFixed(4)} / ${pfmt(pA)}</div></div>
+          <div class="kpi"><div class="label">F (B), p</div><div class="value">${fB.toFixed(4)} / ${pfmt(pB)}</div></div>
+          <div class="kpi"><div class="label">F (A×B), p</div><div class="value">${fAB.toFixed(4)} / ${pfmt(pAB)}</div></div>
+          <div class="kpi"><div class="label">MS Error (MSE)</div><div class="value">${msError.toFixed(4)}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">F (Blocks), p</div><div class="value">${fBlock.toFixed(4)} / ${pfmt(pBlock)}</div></div>
+          <div class="kpi"><div class="label">df (error)</div><div class="value">${dfError}</div></div>
+          <div class="kpi"><div class="label">A×B @ 5%?</div><div class="value">${interactionSig05 ? "Yes" : "No"}</div></div>
         </div>
       `;
 
       const labels = comboMeans.map((m) => m.label);
       const values = comboMeans.map((m) => m.mean);
-      drawBarChart($("#factBar"), labels, values, { title: "Combination means (A×B over blocks)" });
+      drawBarChart($("#factBar"), labels, values, { title: "A×B combination means (over blocks)" });
 
-      const headers = ["Source", "SS", "df", "MS", "F", "Approx. Sig."];
+      const headers = ["Source", "SS", "df", "MS", "F", "p-value"];
       const rows = [
-        ["Factor A", ssA, dfA, msA, fA, sigA.level],
-        ["Factor B", ssB, dfB, msB, fB, sigB.level],
-        ["A×B", ssAB, dfAB, msAB, fAB, sigAB.level],
-        ["Blocks", ssBlock, dfBlock, msBlock, msBlock / msError || "", ""],
-        ["Error", ssError, dfError, msError, "", ""],
+        ["Replications (blocks)", ssBlock, dfBlock, msBlock, fBlock, pfmt(pBlock)],
+        ["Factor A", ssA, dfA, msA, fA, pfmt(pA)],
+        ["Factor B", ssB, dfB, msB, fB, pfmt(pB)],
+        ["A × B (interaction)", ssAB, dfAB, msAB, fAB, pfmt(pAB)],
+        ["Experimental error", ssError, dfError, msError, "", ""],
         ["Total", ssTotal, dfTotal, "", "", ""],
       ];
+      const cdRows = [
+        [
+          "Main effect A (marginal means)",
+          b * r,
+          lsdA5.sed,
+          lsdA5.cd,
+          lsdA1.cd,
+          "Compare two A marginal means (averaged over B and blocks).",
+        ],
+        [
+          "Main effect B (marginal means)",
+          a * r,
+          lsdB5.sed,
+          lsdB5.cd,
+          lsdB1.cd,
+          "Compare two B marginal means (averaged over A and blocks).",
+        ],
+        [
+          "A×B combination (cell means)",
+          r,
+          lsdCell5.sed,
+          lsdCell5.cd,
+          lsdCell1.cd,
+          "Compare any two cell means (same as pairwise simple comparisons at fixed B when n = r per cell).",
+        ],
+      ];
+      const cdTable = buildTable(
+        ["Comparison type", "n per mean", "SEd", "CD (LSD, 5%)", "CD (LSD, 1%)", "Note"],
+        cdRows
+      );
+
       const overallMeanFact = mean(comboMeans.map((m) => m.mean));
       const statsFact = computeBreedingSummaryStats({
         meanValue: overallMeanFact,
-        msGenotype: msAB + msA + msB, // combined signal proxy for factorial treatment variability
+        msGenotype: msAB + msA + msB,
         msError: msError,
         replications: r,
+        dfError,
       });
       const summaryFact = buildTable(
         ["Summary metric", "Value"],
         [
           ["Grand mean", overallMeanFact],
           ["CV (%)", statsFact.cv],
-          ["CD (5%)", statsFact.cd5],
-          ["SEm", statsFact.sem],
-          ["SEd", statsFact.sed],
+          ["SEm (per obs. cell mean context)", statsFact.sem],
           ["H2 (broad sense, %)", statsFact.h2],
           ["GA", statsFact.ga],
           ["GA (% of mean)", statsFact.gaPct],
@@ -2852,8 +4957,8 @@
           ["Phenotypic (sigma^2p)", statsFact.sigmaP, statsFact.pcv],
         ]
       );
-      $("#factTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, rows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryFact}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixFact}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
-        { assumption: "Balanced factorial cells", status: "Required", note: "Each A×B level should have similar replication." },
+      $("#factTableWrap").innerHTML = `<h4>Table 1. ANOVA — partitioned sum of squares (RBD factorial)</h4>${buildTable(headers, rows)}<div style="height:10px"></div><div class="muted small" style="margin-bottom:6px">F-ratios for A, B, A×B, and blocks use the experimental error MS with df = ${dfError}. Approximate sig. (legacy): A ${sigA.note}; B ${sigB.note}; A×B ${sigAB.note}.</div><h4>Table 2. Critical difference (Fisher LSD) for mean comparisons</h4>${cdTable}<div style="height:10px"></div><h4>Table 3. Mean and genetic summary</h4>${summaryFact}<div style="height:10px"></div><h4>Table 4. PCV/GCV/ECV matrix</h4>${matrixFact}<div style="height:10px"></div>${simpleEffectsHtml}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 6. Assumption checklist", [
+        { assumption: "Balanced factorial cells", status: "Required", note: "Each A×B cell has r plots." },
         { assumption: "Independent residuals", status: "Assumed", note: "Dependence distorts interaction significance." },
         { assumption: "Variance homogeneity", status: "Assumed", note: "Heterogeneity affects comparison precision." },
         { assumption: "Residual normality", status: "Assumed", note: "Required for strict parametric inference." }
@@ -2867,15 +4972,16 @@
 
       const best = [...comboMeans].sort((a, b) => b.mean - a.mean)[0];
       const interpretation =
-        `Factorial ANOVA in RBD partitions variability into main effects (A, B), interaction (A×B), blocks, and error.\n` +
-        `Computed F-values:\n` +
-        `• F(A) = ${fA.toFixed(4)} (${sigA.note})\n` +
-        `• F(B) = ${fB.toFixed(4)} (${sigB.note})\n` +
-        `• F(A×B) = ${fAB.toFixed(4)} (${sigAB.note})\n\n` +
-        `If A×B is significant, the ranking of A or B levels changes across the other factor (cross-over interaction).\n` +
-        `In your data, the highest mean combination is ${best.label} (mean=${best.mean.toFixed(3)}).\n\n` +
-        `Genetic summary: H2=${statsFact.h2.toFixed(2)}%, GA=${statsFact.ga.toFixed(3)}, PCV=${statsFact.pcv.toFixed(2)}%, GCV=${statsFact.gcv.toFixed(2)}%, ECV=${statsFact.ecv.toFixed(2)}%.\n\n` +
-        `BKQuant note: significance uses approximate thresholds for offline use. For formal reports, consult official F tables or full statistical software.`;
+        `Total SS is partitioned into replications (blocks), Factor A, Factor B, A×B interaction, and experimental error.\n` +
+        `F-tests (vs pooled MSE, df=${dfError}): F(A)=${fA.toFixed(4)} (p=${pfmt(pA)}), F(B)=${fB.toFixed(4)} (p=${pfmt(pB)}), F(A×B)=${fAB.toFixed(4)} (p=${pfmt(pAB)}), F(blocks)=${fBlock.toFixed(4)} (p=${pfmt(
+          pBlock
+        )}).\n\n` +
+        `Critical differences (LSD): main-effect A uses n=${b * r} per marginal mean; main-effect B uses n=${a * r}; A×B cells use n=${r}. ` +
+        `At 5%: CD_A=${lsdA5.cd.toFixed(4)}, CD_B=${lsdB5.cd.toFixed(4)}, CD_A×B=${lsdCell5.cd.toFixed(4)}.\n\n` +
+        (interactionSig05
+          ? `A×B is significant at 5%; simple effects of A were tested within each B (Table 5) using the same error MS.\n`
+          : `A×B is not significant at 5%; interpret main effects cautiously; Table 5 still lists simple-effect F-tests for reference.\n`) +
+        `Highest cell mean: ${best.label} (${best.mean.toFixed(3)}). H²=${statsFact.h2.toFixed(2)}%, PCV/GCV/ECV=${statsFact.pcv.toFixed(2)}/${statsFact.gcv.toFixed(2)}/${statsFact.ecv.toFixed(2)}%.`;
 
       setInterpretation(
         "factorial",
@@ -2884,6 +4990,298 @@
         { fA, fB, fAB, msError }
       );
     });
+  }
+
+  // --- Three-way factorial A×B×C in RBD ---
+  function renderFactorial3() {
+    const title = "Factorial RBD (A×B×C) — Three-Factor ANOVA";
+    showContentHeader({
+      title,
+      subtitle:
+        "Partition SS into blocks, A, B, C, AB, AC, BC, ABC, and error; % contribution; Tukey HSD; interaction mean tables when significant.",
+    });
+
+    const defaultA = 2;
+    const defaultB = 2;
+    const defaultC = 2;
+    const defaultR = 3;
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Design</div><div class="value">A×B×C in RBD</div></div>
+        <div class="kpi"><div class="label">Cells</div><div class="value">a×b×c × r blocks</div></div>
+        <div class="kpi"><div class="label">Post-hoc</div><div class="value">Tukey HSD</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Input grid</h4>
+            <div class="muted small" style="margin-bottom:8px">
+              Rows = treatment combinations in order A₁B₁C₁, A₁B₁C₂, …, AₐB_bC_c; columns = replications (blocks). Balanced factorial.
+            </div>
+            <div class="input-grid" id="fact3Controls">
+              <div class="two-col">
+                <label>Levels of A (a) <input type="number" min="2" id="fact3A" value="${defaultA}" /></label>
+                <label>Levels of B (b) <input type="number" min="2" id="fact3B" value="${defaultB}" /></label>
+              </div>
+              <label>Levels of C (c) <input type="number" min="2" id="fact3C" value="${defaultC}" /></label>
+              <label>Blocks / replications (r) <input type="number" min="2" id="fact3R" value="${defaultR}" /></label>
+              <button class="action-btn primary2" type="button" id="fact3Build">Build grid</button>
+            </div>
+            <div id="fact3GridWrap" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="fact3Compute">Compute 3-factor ANOVA</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="fact3ResultTop"></div>
+            <div class="chart" style="height:240px;margin-top:12px">
+              <canvas id="fact3Bar" style="width:100%;height:100%"></canvas>
+            </div>
+            <div id="fact3TableWrap" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "fact3",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["fABC"],
+    });
+
+    function buildGrid3(a0, b0, c0, r0) {
+      const wrap = $("#fact3GridWrap");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["A×B×C / Block"];
+      for (let k = 0; k < r0; k++) headers.push(`R${k + 1}`);
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < a0; i++) {
+        for (let j = 0; j < b0; j++) {
+          for (let k = 0; k < c0; k++) {
+            const lab = `A${i + 1}B${j + 1}C${k + 1}`;
+            const cells = [];
+            for (let rep = 0; rep < r0; rep++) {
+              const base = (i + 1) * 6 + (j + 1) * 3 + (k + 1) + rep * 0.4;
+              cells.push(`<td><input type="number" step="0.01" value="${base.toFixed(2)}" data-cell3="a${i}b${j}c${k}r${rep}" /></td>`);
+            }
+            rows.push(`<tr><th>${qs(lab)}</th>${cells.join("")}</tr>`);
+          }
+        }
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    buildGrid3(defaultA, defaultB, defaultC, defaultR);
+
+    $("#fact3Build").addEventListener("click", () => {
+      const a0 = Math.max(2, Number($("#fact3A").value || defaultA));
+      const b0 = Math.max(2, Number($("#fact3B").value || defaultB));
+      const c0 = Math.max(2, Number($("#fact3C").value || defaultC));
+      const r0 = Math.max(2, Number($("#fact3R").value || defaultR));
+      buildGrid3(a0, b0, c0, r0);
+    });
+
+    $("#fact3Compute").addEventListener("click", () => {
+      const a = Math.max(2, Number($("#fact3A").value || defaultA));
+      const b = Math.max(2, Number($("#fact3B").value || defaultB));
+      const c = Math.max(2, Number($("#fact3C").value || defaultC));
+      const r = Math.max(2, Number($("#fact3R").value || defaultR));
+      clearValidation("#fact3GridWrap");
+      const errors = [];
+      const matrix = [];
+      let p = 0;
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          for (let k = 0; k < c; k++) {
+            const row = [];
+            for (let rep = 0; rep < r; rep++) {
+              const input = document.querySelector(`#fact3GridWrap input[data-cell3="a${i}b${j}c${k}r${rep}"]`);
+              const v = Number(input?.value ?? NaN);
+              if (!Number.isFinite(v)) {
+                errors.push(`3-factor: invalid at A${i + 1}B${j + 1}C${k + 1} R${rep + 1}`);
+                markInvalidInput(input, "Numeric value required");
+              }
+              row.push(Number.isFinite(v) ? v : 0);
+            }
+            matrix.push(row);
+            p++;
+          }
+        }
+      }
+      if (shouldBlockForValidation("fact3", errors, "#fact3ResultTop")) return;
+
+      const out = threeWayFactorialRbdAnova(matrix, a, b, c, r);
+      const pfmt = (pv) => (pv < 1e-4 ? "<0.0001" : Number(pv).toFixed(4));
+      const ssT = out.ssTotal;
+      const pct = (ss) => (ssT > 1e-15 ? ((100 * ss) / ssT).toFixed(2) : "0");
+
+      const anovaHeaders = ["Source", "SS", "df", "MS", "F", "p-value", "% of total SS"];
+      const anovaRows = [
+        ["Replications (blocks)", out.ssBlock, out.dfBlock, out.msBlock, out.fBlock, pfmt(out.pBlock), pct(out.ssBlock)],
+        ["Factor A", out.ssA, out.dfA, out.msA, out.fA, pfmt(out.pA), pct(out.ssA)],
+        ["Factor B", out.ssB, out.dfB, out.msB, out.fB, pfmt(out.pB), pct(out.ssB)],
+        ["Factor C", out.ssC, out.dfC, out.msC, out.fC, pfmt(out.pC), pct(out.ssC)],
+        ["A×B", out.ssAB, out.dfAB, out.msAB, out.fAB, pfmt(out.pAB), pct(out.ssAB)],
+        ["A×C", out.ssAC, out.dfAC, out.msAC, out.fAC, pfmt(out.pAC), pct(out.ssAC)],
+        ["B×C", out.ssBC, out.dfBC, out.msBC, out.fBC, pfmt(out.pBC), pct(out.ssBC)],
+        ["A×B×C", out.ssABC, out.dfABC, out.msABC, out.fABC, pfmt(out.pABC), pct(out.ssABC)],
+        ["Pooled error", out.ssError, out.dfError, out.msError, "", "", pct(out.ssError)],
+        ["Total", out.ssTotal, out.dfTotal, "", "", "", "100.00"],
+      ];
+
+      const nA = b * c * r;
+      const nB = a * c * r;
+      const nC = a * b * r;
+      const nAB = c * r;
+      const nAC = b * r;
+      const nBC = a * r;
+      const nABC = r;
+      const abc = a * b * c;
+
+      const tukeyA = tukeyHsd(out.msError, out.dfError, nA, a);
+      const tukeyB = tukeyHsd(out.msError, out.dfError, nB, b);
+      const tukeyC = tukeyHsd(out.msError, out.dfError, nC, c);
+      const tukeyAB = tukeyHsd(out.msError, out.dfError, nAB, a * b);
+      const tukeyAC = tukeyHsd(out.msError, out.dfError, nAC, a * c);
+      const tukeyBC = tukeyHsd(out.msError, out.dfError, nBC, b * c);
+      const tukeyABC = tukeyHsd(out.msError, out.dfError, nABC, abc);
+
+      const tukeyRows = [
+        ["Marginal A means", a, nA, tukeyA.q, tukeyA.hsd],
+        ["Marginal B means", b, nB, tukeyB.q, tukeyB.hsd],
+        ["Marginal C means", c, nC, tukeyC.q, tukeyC.hsd],
+        ["A×B combination means", a * b, nAB, tukeyAB.q, tukeyAB.hsd],
+        ["A×C combination means", a * c, nAC, tukeyAC.q, tukeyAC.hsd],
+        ["B×C combination means", b * c, nBC, tukeyBC.q, tukeyBC.hsd],
+        ["A×B×C cell means", abc, nABC, tukeyABC.q, tukeyABC.hsd],
+      ];
+
+      const sig05 = (p) => p < 0.05;
+      let interHtml = "<h4>Table 3. Means for significant interactions (p &lt; 0.05)</h4>";
+      let anySig = false;
+      if (sig05(out.pAB)) {
+        anySig = true;
+        const hdr = ["", ...Array.from({ length: b }, (_, j) => `B${j + 1}`)];
+        const mrows = [];
+        for (let i = 0; i < a; i++) {
+          mrows.push([`A${i + 1}`, ...Array.from({ length: b }, (_, j) => (out.AB[i][j] / (c * r)).toFixed(4))]);
+        }
+        interHtml += `<div class="muted small" style="margin-top:8px">A×B (two-way means, averaged over C and blocks)</div>${buildTable(hdr, mrows)}`;
+      }
+      if (sig05(out.pAC)) {
+        anySig = true;
+        const hdr = ["", ...Array.from({ length: c }, (_, k) => `C${k + 1}`)];
+        const mrows = [];
+        for (let i = 0; i < a; i++) {
+          mrows.push([`A${i + 1}`, ...Array.from({ length: c }, (_, k) => (out.AC[i][k] / (b * r)).toFixed(4))]);
+        }
+        interHtml += `<div class="muted small" style="margin-top:8px">A×C (averaged over B and blocks)</div>${buildTable(hdr, mrows)}`;
+      }
+      if (sig05(out.pBC)) {
+        anySig = true;
+        const hdr = ["", ...Array.from({ length: c }, (_, k) => `C${k + 1}`)];
+        const mrows = [];
+        for (let j = 0; j < b; j++) {
+          mrows.push([`B${j + 1}`, ...Array.from({ length: c }, (_, k) => (out.BC[j][k] / (a * r)).toFixed(4))]);
+        }
+        interHtml += `<div class="muted small" style="margin-top:8px">B×C (averaged over A and blocks)</div>${buildTable(hdr, mrows)}`;
+      }
+      if (sig05(out.pABC)) {
+        anySig = true;
+        interHtml += `<div class="muted small" style="margin-top:8px">A×B×C cell means (r = ${r} per cell)</div>`;
+        for (let i = 0; i < a; i++) {
+          for (let j = 0; j < b; j++) {
+            const hdr = ["", ...Array.from({ length: c }, (_, k) => `C${k + 1}`)];
+            const mrows = [[`A${i + 1}B${j + 1}`, ...Array.from({ length: c }, (_, k) => (out.T[i][j][k] / r).toFixed(4))]];
+            interHtml += buildTable(hdr, mrows);
+          }
+        }
+      }
+      if (!anySig) {
+        interHtml += `<div class="note">No first- or second-order interaction reached p &lt; 0.05. Main-effect means are still in Table 4 (marginal summaries).</div>`;
+      }
+
+      const meanA = out.A_tot.map((t) => t / (b * c * r));
+      const meanB = out.B_tot.map((t) => t / (a * c * r));
+      const meanC = out.C_tot.map((t) => t / (a * b * r));
+      const margHtml =
+        `<h4>Table 4. Marginal means (for context)</h4>` +
+        `${buildTable(
+          ["Level", "Mean A"],
+          meanA.map((m, i) => [`A${i + 1}`, m])
+        )}<div style="height:8px"></div>${buildTable(
+          ["Level", "Mean B"],
+          meanB.map((m, j) => [`B${j + 1}`, m])
+        )}<div style="height:8px"></div>${buildTable(
+          ["Level", "Mean C"],
+          meanC.map((m, k) => [`C${k + 1}`, m])
+        )}`;
+
+      const combo = [];
+      let pi = 0;
+      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < c; k++) {
+        combo.push({ label: `A${i + 1}B${j + 1}C${k + 1}`, mean: matrix[pi].reduce((s, v) => s + v, 0) / r });
+        pi++;
+      }
+      const labels = combo.map((x) => x.label);
+      const values = combo.map((x) => x.mean);
+      drawBarChart($("#fact3Bar"), labels, values, { title: "A×B×C cell means (all combinations)" });
+
+      $("#fact3ResultTop").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F (A×B×C)</div><div class="value">${out.fABC.toFixed(3)} / p=${pfmt(out.pABC)}</div></div>
+          <div class="kpi"><div class="label">MSE (pooled)</div><div class="value">${out.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">df (error)</div><div class="value">${out.dfError}</div></div>
+        </div>
+      `;
+
+      $("#fact3TableWrap").innerHTML = `
+        <h4>Table 1. ANOVA and % contribution to total SS</h4>
+        <div class="muted small" style="margin-bottom:6px">% columns: 100 × SS(source) / SS(total). Error and blocks included.</div>
+        ${buildTable(anovaHeaders, anovaRows)}
+        <h4 style="margin-top:12px">Table 2. Tukey HSD (α ≈ 0.05, studentized-range interpolation)</h4>
+        <div class="muted small" style="margin-bottom:6px">HSD = q × √(MSE/n), where n = observations supporting each mean in that family. Compare any pair: |mean difference| &gt; HSD implies significance at the family-wise level (balanced, standard assumptions). For k &gt; 20 means, q is linearly extrapolated beyond the tabulated k = 20 column (approximate).</div>
+        ${buildTable(
+          ["Comparison family", "k (means)", "n per mean", "q", "HSD"],
+          tukeyRows.map((row) => [
+            row[0],
+            row[1],
+            row[2],
+            Number.isFinite(row[3]) ? row[3].toFixed(3) : "—",
+            Number.isFinite(row[4]) ? row[4].toFixed(4) : "—",
+          ])
+        )}
+        ${interHtml}
+        ${margHtml}
+        ${assumptionsChecklistHtml("Assumptions", [
+          { assumption: "Balanced design", status: "Required", note: "Equal r for every A×B×C cell." },
+          { assumption: "Independent errors", status: "Assumed", note: "Required for F-tests and Tukey." },
+          { assumption: "Homogeneity of variance", status: "Assumed", note: "Tukey HSD is approximate if variances differ." },
+        ])}
+      `;
+
+      const interpretation =
+        `Three-factor RBD: total variation is split among blocks, A, B, C, AB, AC, BC, ABC, and pooled error. ` +
+        `A×B×C interaction F = ${out.fABC.toFixed(4)} (p = ${pfmt(out.pABC)}). ` +
+        `Tukey HSD uses pooled MSE with df = ${out.dfError}. ` +
+        `Highest cell mean: ${[...combo].sort((x, y) => y.mean - x.mean)[0].label}.`;
+
+      setInterpretation("fact3", interpretation, "", { fABC: out.fABC, msError: out.msError });
+    });
+
+    $("#fact3Compute").click();
   }
 
   // --- Latin Square (often requested as "Lattice/Latin square") ---
@@ -3091,10 +5489,11 @@
 
   // --- Augmented Design (Checks replicated in blocks; new entries unreplicated) ---
   function renderAugmented() {
-    const title = "Augmented Design - Adjusted Means (Checks + New Entries)";
+    const title = "Augmented RCBD — Checks + Test Entries";
     showContentHeader({
       title,
-      subtitle: "Compute adjusted means for new entries using check-based block adjustment, with exportable tables and plot.",
+      subtitle:
+        "Checks replicated per block; test entries unreplicated. Block adjustment factors from check plots; additive adjusted means; four standard errors of difference (checks, entries same/different block, check vs entry).",
     });
 
     const defaultChecks = 3;
@@ -3105,7 +5504,7 @@
       <div class="kpi-row">
         <div class="kpi"><div class="label">Design type</div><div class="value">Augmented (checks replicated)</div></div>
         <div class="kpi"><div class="label">Purpose</div><div class="value">Many new genotypes with limited replication</div></div>
-        <div class="kpi"><div class="label">Outputs</div><div class="value">Adjusted means + check ANOVA</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">BAF, SEs, adjusted means</div></div>
       </div>
 
       <div style="height:12px"></div>
@@ -3131,7 +5530,7 @@
               </label>
               <button class="action-btn primary2" type="button" id="augBuild">Build inputs</button>
               <div class="note" style="margin:0">
-                BKQuant adjustment: block effect is estimated from check means in each block.
+                Additive adjustment: adjusted = observed + (grand check mean − block check mean). Multiplicative BAF = grand / block check mean (optional scaling).
               </div>
             </div>
             <div id="augInputsWrap" style="margin-top:12px"></div>
@@ -3244,64 +5643,96 @@
         }
       }
 
-      // Check means per block and overall
       const blockCheckMeans = [];
       for (let j = 0; j < b; j++) {
         let s = 0;
         for (let i = 0; i < c; i++) s += checks[i][j];
         blockCheckMeans[j] = s / c;
       }
-      const grandCheckMean = mean(blockCheckMeans); // mean of block means == overall checks mean
+      const grandCheckMean = mean(blockCheckMeans);
       const blockEffects = blockCheckMeans.map((m) => m - grandCheckMean);
+      const blockAdjFactors = blockCheckMeans.map((m) => (Math.abs(m) > 1e-12 ? grandCheckMean / m : 1));
 
-      // Check ANOVA (RBD on checks only) to estimate error MS
       const checkOut = rbdAnova(checks, b, c);
+      const seAug = augmentedRcbdStandardErrors(checkOut.msError, b, c);
+      const tdf = checkOut.dfError;
+      const t05 = studentTInvTwoTail(tdf, 0.05);
+      const t01 = studentTInvTwoTail(tdf, 0.01);
+      const sedTableRow = (label, formula, se) => [
+        label,
+        formula,
+        se,
+        Number.isFinite(se) ? t05 * se : "—",
+        Number.isFinite(se) ? t01 * se : "—",
+      ];
 
-      // Read new entries
       const newEntries = [];
       for (let i = 0; i < n; i++) {
         const blk = Number(document.querySelector(`#augInputsWrap select[data-newblk="n${i}"]`)?.value || 1);
         const val = Number(document.querySelector(`#augInputsWrap input[data-newval="n${i}"]`)?.value ?? NaN);
         const obs = Number.isFinite(val) ? val : 0;
-        const adj = obs - blockEffects[blk - 1];
-        newEntries.push({ id: `N${i + 1}`, block: `B${blk}`, observed: obs, adjusted: adj });
+        const bidx = blk - 1;
+        const adjAdd = obs - blockEffects[bidx];
+        const adjMult = obs * blockAdjFactors[bidx];
+        newEntries.push({
+          id: `N${i + 1}`,
+          block: `B${blk}`,
+          observed: obs,
+          adjustedAdd: adjAdd,
+          adjustedMult: adjMult,
+        });
       }
 
-      // Include checks (use overall check means) as adjusted for reporting
       const checkAdj = [];
       for (let i = 0; i < c; i++) {
         const row = checks[i];
-        checkAdj.push({ id: `C${i + 1}`, block: "All", observed: mean(row), adjusted: mean(row) }); // mean across blocks
+        const m = mean(row);
+        checkAdj.push({ id: `C${i + 1}`, block: "—", observed: m, adjustedAdd: m, adjustedMult: m });
       }
 
-      const all = [...checkAdj.map((x) => ({ ...x, type: "Check" })), ...newEntries.map((x) => ({ ...x, type: "New" }))];
-      const maxAdjusted = Math.max(...all.map((x) => x.adjusted));
+      const all = [
+        ...checkAdj.map((x) => ({ ...x, type: "Check" })),
+        ...newEntries.map((x) => ({ ...x, type: "Test entry" })),
+      ];
+      const maxAdjusted = Math.max(...all.map((x) => x.adjustedAdd));
 
       $("#augResultTop").innerHTML = `
         <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
-          <div class="kpi"><div class="label">Grand check mean</div><div class="value">${grandCheckMean.toFixed(3)}</div></div>
-          <div class="kpi"><div class="label">Blocks (b)</div><div class="value">${b}</div></div>
-          <div class="kpi"><div class="label">Check MS Error</div><div class="value">${checkOut.msError.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">Max adjusted mean</div><div class="value">${maxAdjusted.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Grand check mean (G)</div><div class="value">${grandCheckMean.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Blocks (b) / Checks (c)</div><div class="value">${b} / ${c}</div></div>
+          <div class="kpi"><div class="label">σ̂² (checks MSE)</div><div class="value">${checkOut.msError.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Max adj. (additive)</div><div class="value">${maxAdjusted.toFixed(3)}</div></div>
         </div>
       `;
 
-      // Plot adjusted means (top 10)
-      const top = [...all].sort((a, b) => b.adjusted - a.adjusted).slice(0, Math.min(10, all.length));
+      const top = [...all].sort((a, b) => b.adjustedAdd - a.adjustedAdd).slice(0, Math.min(12, all.length));
       drawBarChart(
         $("#augBar"),
         top.map((x) => x.id),
-        top.map((x) => x.adjusted),
-        { title: "Top adjusted means (checks + new)" }
+        top.map((x) => x.adjustedAdd),
+        { title: "Top additive adjusted means (checks + test entries)" }
       );
 
-      const headers1 = ["Genotype", "Type", "Block", "Observed", "Adjusted"];
-      const rows1 = all.map((x) => [x.id, x.type, x.block, x.observed, x.adjusted]);
-      const table1 = buildTable(headers1, rows1);
+      const headers0 = ["Block", "Mean of checks (B̄_j)", "Additive offset (G − B̄_j)", "Multiplicative BAF (G / B̄_j)"];
+      const rows0 = blockCheckMeans.map((m, j) => [`B${j + 1}`, m, grandCheckMean - m, blockAdjFactors[j]]);
 
-      const headers2 = ["Block", "Check mean", "Block effect (mean - grand)"];
-      const rows2 = blockCheckMeans.map((m, j) => [`B${j + 1}`, m, blockEffects[j]]);
-      const table2 = buildTable(headers2, rows2);
+      const headers1 = ["Genotype", "Type", "Block", "Observed", "Adjusted (additive)", "Adjusted (× BAF)"];
+      const rows1 = all.map((x) => [
+        x.id,
+        x.type,
+        x.block,
+        x.observed,
+        x.adjustedAdd,
+        x.type === "Check" ? "—" : x.adjustedMult,
+      ]);
+
+      const headersSe = ["Comparison", "SED formula", "SED", "CD (5%)", "CD (1%)"];
+      const rowsSe = [
+        sedTableRow("Two checks", "√(2σ̂²/b)", seAug.seCheckCheck),
+        sedTableRow("Two test entries, same block", "√(2σ̂²(c+1)/c)", seAug.seEntrySame),
+        sedTableRow("Two test entries, different blocks", "√(2σ̂²(c+2)/c)", seAug.seEntryDiff),
+        sedTableRow("Check vs test entry", "√(2σ̂²(c+1)/(bc))", seAug.seCheckEntry),
+      ];
 
       const headers3 = ["Checks ANOVA Source", "SS", "df", "MS", "F"];
       const rows3 = [
@@ -3310,18 +5741,29 @@
         ["Error", checkOut.ssError, checkOut.dfError, checkOut.msError, ""],
         ["Total", checkOut.ssTotal, checkOut.dfTreat + checkOut.dfBlock + checkOut.dfError, "", ""],
       ];
-      const table3 = buildTable(headers3, rows3);
 
-      $("#augTableWrap").innerHTML = `${table1}<div style="height:10px"></div>${table2}<div style="height:10px"></div>${table3}`;
+      $("#augTableWrap").innerHTML = `
+        <h4>Table 1. Block adjustment factors (from check plots)</h4>
+        <div class="muted small" style="margin-bottom:6px">G = mean of block check means. Additive offset shifts to common level; BAF = G/B̄_j multiplies raw yield to overall check mean.</div>
+        ${buildTable(headers0, rows0)}
+        <h4 style="margin-top:12px">Table 2. Observed and adjusted means</h4>
+        <div class="muted small" style="margin-bottom:6px">Additive adjusted test entry = observed + (G − B̄_j). Checks: marginal mean across blocks (no BAF column).</div>
+        ${buildTable(headers1, rows1)}
+        <h4 style="margin-top:12px">Table 3. Standard errors of difference (σ̂² = check MSE, df=${tdf})</h4>
+        <div class="muted small" style="margin-bottom:6px">Federer-type augmented RCBD. CD = t × SED using checks-only error df.</div>
+        ${buildTable(headersSe, rowsSe)}
+        <h4 style="margin-top:12px">Table 4. ANOVA — checks in randomized blocks</h4>
+        ${buildTable(headers3, rows3)}
+      `;
 
       const deviationHtml = deviationBanner("augmented", { maxAdjusted }, ["maxAdjusted"]);
-      const best = [...all].sort((a, b) => b.adjusted - a.adjusted)[0];
+      const best = [...all].sort((a, b) => b.adjustedAdd - a.adjustedAdd)[0];
       const interpretation =
-        `Augmented designs use replicated checks to estimate block effects, then adjust unreplicated new entries.\n\n` +
-        `Adjustment used (BKQuant): adjusted = observed − (block check mean − grand check mean).\n` +
-        `This removes systematic block differences estimated from checks.\n\n` +
-        `Top adjusted genotype: ${best.id} (${best.type}) with adjusted mean ${best.adjusted.toFixed(3)}.\n\n` +
-        `If results deviate from previous runs, it usually happens because block assignments or check values changed, altering block effects and adjustments.`;
+        `Augmented RCBD: checks replicated in each block; test entries once.\n\n` +
+        `Table 1: block adjustment factors from mean of c checks per block — additive (G − B̄_j) and multiplicative BAF (G/B̄_j). ` +
+        `Table 2: test entry adjusted means (additive) = observed + (G − B̄_j); optional multiplicative = observed × BAF.\n\n` +
+        `Table 3: four SEDs — two checks √(2σ̂²/b); two entries same block √(2σ̂²(c+1)/c); different blocks √(2σ̂²(c+2)/c); check vs entry √(2σ̂²(c+1)/(bc)), with σ̂² = ${checkOut.msError.toFixed(4)}.\n\n` +
+        `Largest additive adjusted: ${best.id} (${best.type}) = ${best.adjustedAdd.toFixed(3)}.`;
 
       setInterpretation("augmented", interpretation, deviationHtml || "", { maxAdjusted, msError: checkOut.msError });
     });
@@ -3334,7 +5776,8 @@
     const title = "Split Plot Design - ANOVA";
     showContentHeader({
       title,
-      subtitle: "Split-plot in RBD: A tested against Error(A)=Blocks×A; B and A×B tested against Error(B)=residual.",
+      subtitle:
+        "Variance: Blocks, Factor A (main plot), Error (a), Factor B (sub plot), A×B, Error (b). F_A vs Error (a); F_B and F_A×B vs Error (b). Separate CD for main plots, sub-plots, cells, and simple effects.",
     });
 
     const defaultA = 3;
@@ -3445,7 +5888,6 @@
       const b = Math.max(2, Number($("#spB").value || defaultB));
       const r = Math.max(2, Number($("#spR").value || defaultR));
 
-      // y[i][j][k]
       const y = [];
       for (let i = 0; i < a; i++) {
         y[i] = [];
@@ -3459,130 +5901,142 @@
         }
       }
 
-      const N = a * b * r;
-      let sumY2 = 0;
-      let G = 0;
-      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) for (let k = 0; k < r; k++) {
-        const v = y[i][j][k];
-        sumY2 += v * v;
-        G += v;
-      }
-      const CF = (G * G) / N;
-      const ssTotal = sumY2 - CF;
+      const sp = splitPlotRbdAnova(y, a, b, r);
+      const {
+        ssTotal,
+        ssBlock,
+        ssA,
+        ssErrorA,
+        ssB,
+        ssAB,
+        ssErrorB,
+        dfBlock,
+        dfA,
+        dfErrorA,
+        dfB,
+        dfAB,
+        dfErrorB,
+        dfTotal,
+        msBlock,
+        msA,
+        msErrorA,
+        msB,
+        msAB,
+        msErrorB,
+        fA,
+        fB,
+        fAB,
+        pA,
+        pB,
+        pAB,
+        sigA,
+        sigB,
+        sigAB,
+        ABtotals,
+      } = sp;
 
-      // Totals
-      const blockTotals = Array(r).fill(0); // Bk..
-      const Atotals = Array(a).fill(0); // Ai..
-      const Btotals = Array(b).fill(0); // .Bj.
-      const ABtotals = Array.from({ length: a }, () => Array(b).fill(0)); // ABij.
-      const AblockTotals = Array.from({ length: r }, () => Array(a).fill(0)); // Aik. (sum over B within block for each A)
-
-      for (let k = 0; k < r; k++) {
-        for (let i = 0; i < a; i++) {
-          let aik = 0;
-          for (let j = 0; j < b; j++) {
-            const v = y[i][j][k];
-            blockTotals[k] += v;
-            Atotals[i] += v;
-            Btotals[j] += v;
-            ABtotals[i][j] += v;
-            aik += v;
-          }
-          AblockTotals[k][i] = aik;
-        }
-      }
-
-      // SS blocks
-      let ssBlock = 0;
-      for (let k = 0; k < r; k++) ssBlock += (blockTotals[k] * blockTotals[k]) / (a * b);
-      ssBlock -= CF;
-
-      // SS A
-      let ssA = 0;
-      for (let i = 0; i < a; i++) ssA += (Atotals[i] * Atotals[i]) / (b * r);
-      ssA -= CF;
-
-      // SS Error(A) = blocks×A
-      let ssAblock = 0;
-      for (let k = 0; k < r; k++) for (let i = 0; i < a; i++) ssAblock += (AblockTotals[k][i] * AblockTotals[k][i]) / b;
-      ssAblock = ssAblock - ssBlock - ssA - CF;
-      // Explanation: ssAblock = Σ(Aik^2)/b − Σ(Bk^2)/(ab) − Σ(Ai^2)/(br) + CF
-      // but we computed ssBlock and ssA already as (Σ.. − CF), so subtracting CF again yields correct algebra.
-      // (keeps arithmetic stable and consistent with other modules)
-
-      // SS B
-      let ssB = 0;
-      for (let j = 0; j < b; j++) ssB += (Btotals[j] * Btotals[j]) / (a * r);
-      ssB -= CF;
-
-      // SS AB
-      let ssABall = 0;
-      for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) ssABall += (ABtotals[i][j] * ABtotals[i][j]) / r;
-      const ssTreat = ssABall - CF;
-      const ssAB = ssTreat - ssA - ssB;
-
-      // SS Error(B) = residual
-      const ssErrorB = ssTotal - ssBlock - ssA - ssAblock - ssB - ssAB;
-
-      const dfBlock = r - 1;
-      const dfA = a - 1;
-      const dfErrorA = (r - 1) * (a - 1);
-      const dfB = b - 1;
-      const dfAB = (a - 1) * (b - 1);
-      const dfErrorB = a * (r - 1) * (b - 1);
-      const dfTotal = N - 1;
-
-      const msA = ssA / dfA;
-      const msErrorA = ssAblock / dfErrorA;
-      const msB = ssB / dfB;
-      const msAB = ssAB / dfAB;
-      const msErrorB = ssErrorB / dfErrorB;
-
-      const fA = msErrorA === 0 ? 0 : msA / msErrorA;
-      const fB = msErrorB === 0 ? 0 : msB / msErrorB;
-      const fAB = msErrorB === 0 ? 0 : msAB / msErrorB;
-
-      const sigA = approxFSignificance(fA, dfA, dfErrorA);
-      const sigB = approxFSignificance(fB, dfB, dfErrorB);
-      const sigAB = approxFSignificance(fAB, dfAB, dfErrorB);
+      const pfmt = (pv) => (pv < 1e-4 ? "<0.0001" : Number(pv).toFixed(4));
+      const cd = splitPlotCriticalDifferences(msErrorA, dfErrorA, msErrorB, dfErrorB, a, b, r);
 
       $("#spResultTop").innerHTML = `
-        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
-          <div class="kpi"><div class="label">F(A) vs Error(A)</div><div class="value">${fA.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">F(B) vs Error(B)</div><div class="value">${fB.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">F(A×B) vs Error(B)</div><div class="value">${fAB.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">MS Error(A)</div><div class="value">${msErrorA.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">MS Error(B)</div><div class="value">${msErrorB.toFixed(4)}</div></div>
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr))">
+          <div class="kpi"><div class="label">F(A) / p — vs Error (a)</div><div class="value">${fA.toFixed(4)} / ${pfmt(pA)}</div></div>
+          <div class="kpi"><div class="label">F(B) / p — vs Error (b)</div><div class="value">${fB.toFixed(4)} / ${pfmt(pB)}</div></div>
+          <div class="kpi"><div class="label">F(A×B) / p — vs Error (b)</div><div class="value">${fAB.toFixed(4)} / ${pfmt(pAB)}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(2, minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">MS Error (a)</div><div class="value">${msErrorA.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">MS Error (b)</div><div class="value">${msErrorB.toFixed(4)}</div></div>
         </div>
       `;
 
-      // Plot AB means
       const comboMeans = [];
       for (let i = 0; i < a; i++) for (let j = 0; j < b; j++) comboMeans.push({ label: `A${i + 1}B${j + 1}`, mean: ABtotals[i][j] / r });
-      drawBarChart($("#spBar"), comboMeans.map((x) => x.label), comboMeans.map((x) => x.mean), { title: "A×B means (over blocks)" });
+      drawBarChart($("#spBar"), comboMeans.map((x) => x.label), comboMeans.map((x) => x.mean), { title: "A×B cell means (r blocks)" });
 
-      const headers = ["Source", "SS", "df", "MS", "F", "Tested against"];
-      const rows = [
-        ["Blocks", ssBlock, dfBlock, ssBlock / dfBlock, "", ""],
-        ["A (main plot)", ssA, dfA, msA, fA, "Error(A)"],
-        ["Error(A) = Blocks×A", ssAblock, dfErrorA, msErrorA, "", ""],
-        ["B (sub plot)", ssB, dfB, msB, fB, "Error(B)"],
-        ["A×B", ssAB, dfAB, msAB, fAB, "Error(B)"],
-        ["Error(B)", ssErrorB, dfErrorB, msErrorB, "", ""],
-        ["Total", ssTotal, dfTotal, "", "", ""],
+      const anovaHeaders = ["Source", "SS", "df", "MS", "F", "p-value", "F-test denominator"];
+      const anovaRows = [
+        ["Blocks (replicates)", ssBlock, dfBlock, msBlock, "", "", "—"],
+        ["Factor A (main plot)", ssA, dfA, msA, fA, pfmt(pA), "Error (a)"],
+        ["Error (a) — main-plot error", ssErrorA, dfErrorA, msErrorA, "", "", "MS error (a)"],
+        ["Factor B (sub plot)", ssB, dfB, msB, fB, pfmt(pB), "Error (b)"],
+        ["A × B interaction", ssAB, dfAB, msAB, fAB, pfmt(pAB), "Error (b)"],
+        ["Error (b) — sub-plot error", ssErrorB, dfErrorB, msErrorB, "", "", "MS error (b)"],
+        ["Total", ssTotal, dfTotal, "", "", "", ""],
       ];
-      $("#spTableWrap").innerHTML = buildTable(headers, rows);
+
+      const fmtCd = (x) => (Number.isFinite(x) ? x.toFixed(4) : "—");
+      const cdHeaders = ["Comparison (balanced split-plot)", "SE of difference", "df for t", "CD (5%)", "CD (1%)"];
+      const cdRows = [
+        [
+          "Marginal A means (ȳ_i··)",
+          cd.sedA.toFixed(4),
+          `${dfErrorA}`,
+          fmtCd(cd.cdA5),
+          fmtCd(cd.cdA1),
+        ],
+        [
+          "Marginal B means (ȳ_·j·)",
+          cd.sedB.toFixed(4),
+          `${dfErrorB}`,
+          fmtCd(cd.cdB5),
+          fmtCd(cd.cdB1),
+        ],
+        [
+          "A×B cell means — any pair (ȳ_ij·)",
+          cd.sedCell.toFixed(4),
+          `${dfErrorB}`,
+          fmtCd(cd.cdAB5),
+          fmtCd(cd.cdAB1),
+        ],
+        [
+          "Simple effects: B at fixed A, or A at fixed B",
+          cd.sedCell.toFixed(4),
+          `${dfErrorB}`,
+          fmtCd(cd.cdSimple5),
+          fmtCd(cd.cdSimple1),
+        ],
+      ];
+
+      const simpleRows = [];
+      for (let i = 0; i < a; i++) {
+        simpleRows.push([
+          `Compare B levels holding A${i + 1} fixed`,
+          cd.sedCell.toFixed(4),
+          `${dfErrorB}`,
+          fmtCd(cd.cdSimple5),
+          fmtCd(cd.cdSimple1),
+        ]);
+      }
+      for (let j = 0; j < b; j++) {
+        simpleRows.push([
+          `Compare A levels holding B${j + 1} fixed`,
+          cd.sedCell.toFixed(4),
+          `${dfErrorB}`,
+          fmtCd(cd.cdSimple5),
+          fmtCd(cd.cdSimple1),
+        ]);
+      }
+
+      $("#spTableWrap").innerHTML = `
+        <h4>Table 1. Split-plot ANOVA (RBD)</h4>
+        <div class="muted small" style="margin-bottom:6px">Factor A is tested against <strong>Error (a)</strong> (Blocks×A). Factor B and A×B are tested against <strong>Error (b)</strong> (sub-plot residual).</div>
+        ${buildTable(anovaHeaders, anovaRows)}
+        <h4 style="margin-top:12px">Table 2. Critical differences (Fisher LSD)</h4>
+        <div class="muted small" style="margin-bottom:6px">CD = t<sub>α/2,df</sub> × SE<sub>d</sub>. Main-plot contrasts use MS<sub>Error(a)</sub> and df (a); subplot, interaction, and simple-effect contrasts use MS<sub>Error(b)</sub> and df (b).</div>
+        ${buildTable(cdHeaders, cdRows)}
+        <h4 style="margin-top:12px">Table 3. Simple effects — same CD at every level (balanced)</h4>
+        <div class="muted small" style="margin-bottom:6px">For balanced designs, pairwise comparisons among B levels within a fixed A, and among A levels within a fixed B, share the same SE<sub>d</sub> = √(2·MS<sub>Error(b)</sub>/r).</div>
+        ${buildTable(cdHeaders, simpleRows)}
+      `;
 
       const deviationHtml = deviationBanner("splitplot", { fA, fB, fAB }, ["fA", "fB", "fAB"]);
       const best = [...comboMeans].sort((x, y) => y.mean - x.mean)[0];
       const interpretation =
-        `Split-plot ANOVA uses two error terms: Error(A) for the main-plot factor A, and Error(B) for subplot factor B and A×B.\n\n` +
-        `Computed (approx significance):\n` +
-        `• A: F=${fA.toFixed(4)} (${sigA.note})\n` +
-        `• B: F=${fB.toFixed(4)} (${sigB.note})\n` +
-        `• A×B: F=${fAB.toFixed(4)} (${sigAB.note})\n\n` +
-        `Best mean combination: ${best.label} (mean=${best.mean.toFixed(3)}).\n\n` +
-        `If A×B is significant, interpret main effects cautiously and select based on specific combinations.`;
+        `Split-plot RBD: variance is partitioned into blocks, main plots (A), Error (a), sub plots (B), A×B, and Error (b).\n` +
+        `F_A = MS_A / MS_Error(a) = ${fA.toFixed(4)} (p ≈ ${pfmt(pA)}); F_B and F_A×B use MS_Error(b): F_B = ${fB.toFixed(4)} (p ≈ ${pfmt(pB)}), F_A×B = ${fAB.toFixed(4)} (p ≈ ${pfmt(pAB)}).\n\n` +
+        `Critical differences: use CD for A (marginal means) with Error (a); use CD for B, A×B cells, and simple effects with Error (b). Tables 2–3 list SE<sub>d</sub> and CD at 5% and 1%.\n\n` +
+        `Largest A×B mean: ${best.label} (${best.mean.toFixed(3)}). If interaction is significant, compare cell means and simple effects rather than only marginal effects.`;
 
       setInterpretation("splitplot", interpretation, deviationHtml || "", { fA, fB, fAB, msErrorA, msErrorB });
     });
@@ -3906,30 +6360,319 @@
     $("#regCompute").click();
   }
 
-  // --- PCA (2D demo) ---
-  function renderPCA() {
-    const title = "PCA (Principal Component Analysis) - 2 Trait Demo";
+  // --- Multiple linear regression (VIF, AIC stepwise, diagnostics) ---
+  function renderMultipleLinearRegression() {
+    const title = "Multiple Linear Regression (MLR)";
     showContentHeader({
       title,
-      subtitle: "Offline PCA for two traits with explained variance + PC1/PC2 directions.",
+      subtitle:
+        "OLS with VIF screening (VIF > 10 removed), AIC stepwise selection, overall F-test, and residual diagnostics (Q-Q, residuals vs fitted).",
     });
 
-    const defaultN = 10;
+    const sampleMlr = [
+      "N,P,K,Yield",
+      "12,18,42,3.05",
+      "14,19,44,3.22",
+      "11,17,40,2.98",
+      "15,21,46,3.38",
+      "13,18,43,3.12",
+      "16,22,47,3.45",
+      "12,17,41,3.01",
+      "14,20,45,3.28",
+      "13,19,42,3.15",
+      "15,21,46,3.40",
+      "11,16,39,2.92",
+      "14,18,44,3.20",
+    ].join("\n");
+
     const bodyHtml = `
       <div class="two-col">
         <div>
           <div class="section" style="margin:0">
-            <h4>Input data (two traits)</h4>
-            <div class="muted small" style="margin-bottom:8px">Paste equal-length numbers for Trait 1 (X) and Trait 2 (Y).</div>
+            <h4>Data matrix</h4>
+            <div class="muted small" style="margin-bottom:8px">
+              Rows = observations; columns = numeric traits. Header row with names recommended. Choose which column is the response (Y); all other columns are candidate predictors.
+            </div>
             <label>
-              Trait 1 (X)
-              <textarea id="pcaX">${Array.from({ length: defaultN }, (_, i) => (2 + i * 0.65 + (i % 4 === 0 ? 0.3 : -0.1)).toFixed(2)).join(", ")}</textarea>
+              Data
+              <textarea id="mlrData" rows="14" style="width:100%;font-family:ui-monospace,monospace;font-size:12px">${sampleMlr}</textarea>
+            </label>
+            <div class="input-grid" style="margin-top:10px">
+              <label>
+                Response (Y)
+                <select id="mlrY"></select>
+              </label>
+              <label>
+                VIF threshold
+                <input type="number" id="mlrVifMax" value="10" min="1" step="0.5" title="Predictors with VIF above this are removed iteratively (highest VIF first)" />
+              </label>
+            </div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="mlrCompute">Fit MLR</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Model summary</h4>
+            <div id="mlrKpis"></div>
+            <div class="chart" style="height:240px;margin-top:12px">
+              <canvas id="mlrQQ" style="width:100%;height:100%"></canvas>
+            </div>
+            <div class="chart" style="height:240px;margin-top:12px">
+              <canvas id="mlrResFitted" style="width:100%;height:100%"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>VIF diagnostics &amp; variable screening</h4>
+        <div id="mlrVifWrap"></div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>Stepwise selection (AIC)</h4>
+        <div id="mlrStepWrap"></div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>Coefficients &amp; ANOVA</h4>
+        <div id="mlrFitWrap"></div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "mlr",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["r2"],
+    });
+
+    $("#mlrCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      const errors = [];
+      const parsed = parseBiometricTraitMatrix($("#mlrData").value);
+      if (parsed.error) {
+        errors.push(`MLR: ${parsed.error}`);
+        markInvalidInput($("#mlrData"), parsed.error);
+      }
+      if (shouldBlockForValidation("mlr", errors, "#mlrFitWrap")) return;
+
+      const { colNames, data } = parsed;
+      const n = data.length;
+      const pAll = colNames.length;
+      if (pAll < 2) {
+        errors.push("Need at least 2 columns (one response and one predictor).");
+        markInvalidInput($("#mlrData"), "At least 2 columns");
+      }
+      if (n < 4) {
+        errors.push("Need at least 4 observations for multiple regression diagnostics.");
+        markInvalidInput($("#mlrData"), "Need more rows");
+      }
+      if (shouldBlockForValidation("mlr", errors, "#mlrFitWrap")) return;
+
+      const sel = $("#mlrY");
+      const prev = (sel.value || "").trim();
+      sel.innerHTML = colNames.map((c) => `<option value="${qs(c)}">${qs(c)}</option>`).join("");
+      const prevIdx = colNames.findIndex((c) => c === prev);
+      const yieldGuess = colNames.findIndex((c) => String(c).toLowerCase().includes("yield"));
+      const yIdx = prevIdx >= 0 ? prevIdx : yieldGuess >= 0 ? yieldGuess : colNames.length - 1;
+      sel.selectedIndex = yIdx;
+
+      const y = data.map((row) => row[yIdx]);
+      const predIdx = colNames.map((_, i) => i).filter((i) => i !== yIdx);
+      const predNames = predIdx.map((i) => colNames[i]);
+      const Xraw = data.map((row) => predIdx.map((j) => row[j]));
+
+      if (!predIdx.length) {
+        $("#mlrKpis").innerHTML = `<div class="note">Choose a response column so at least one predictor remains.</div>`;
+        $("#mlrVifWrap").innerHTML = "";
+        $("#mlrStepWrap").innerHTML = "";
+        $("#mlrFitWrap").innerHTML = "";
+        return;
+      }
+
+      const vifMax = Math.max(1, Number($("#mlrVifMax").value) || 10);
+
+      const vifInitial = computeVifs(Xraw);
+      const initialVifRows = predNames.map((nm, j) => [nm, vifInitial[j].toFixed(3)]);
+
+      const vifOut = vifPrunePredictors(Xraw, predNames, vifMax);
+      if (vifOut.names.length > 0 && n <= vifOut.names.length + 1) {
+        markInvalidInput($("#mlrData"), "Need n > number of predictors + 1");
+        if (
+          shouldBlockForValidation(
+            "mlr",
+            [`After VIF screening: need n > p + 1 for unique OLS (n=${n}, p=${vifOut.names.length}).`],
+            "#mlrFitWrap"
+          )
+        )
+          return;
+      }
+
+      const removedRows = vifOut.removed.map((r) => [r.name, r.vif.toFixed(3)]);
+      const afterVifRows =
+        vifOut.names.length === 0
+          ? []
+          : vifOut.names.map((nm, j) => [nm, vifOut.finalVifs[j].toFixed(3)]);
+
+      $("#mlrVifWrap").innerHTML = `
+        <div class="muted small" style="margin-bottom:8px">Variance Inflation Factor (VIF): values &gt; ${vifMax} trigger removal (highest VIF eliminated first until all remaining ≤ ${vifMax} or no predictors left).</div>
+        ${buildTable(["Predictor", "VIF (initial)"], initialVifRows)}
+        <div style="height:10px"></div>
+        ${removedRows.length ? `<div class="muted small" style="margin-bottom:6px">Removed for multicollinearity</div>${buildTable(["Removed predictor", "VIF at removal"], removedRows)}<div style="height:10px"></div>` : `<div class="muted small" style="margin-bottom:8px">No predictors exceeded VIF ${vifMax}.</div>`}
+        ${afterVifRows.length ? `${buildTable(["Predictor", "VIF (after screening)"], afterVifRows)}` : `<div class="note">All predictors were removed by VIF screening; the final model is intercept-only.</div>`}
+      `;
+
+      function fitVifCleanFull() {
+        if (!vifOut.X[0]?.length) {
+          const X0 = y.map(() => [1]);
+          return olsFitFromDesign(X0, y);
+        }
+        const Xd = vifOut.X.map((row) => [1, ...row]);
+        return olsFitFromDesign(Xd, y);
+      }
+
+      const fitAfterVif = fitVifCleanFull();
+      const aicAfterVif = fitAfterVif ? linearModelAic(fitAfterVif.n, fitAfterVif.sse, fitAfterVif.beta.length) : Infinity;
+
+      const step = stepwiseAicSelection(vifOut.X, y, vifOut.names);
+      const finalFit = step.fit;
+      const aicFinal = step.aic;
+
+      if (!finalFit) {
+        $("#mlrKpis").innerHTML = `<div class="note">Model could not be fitted (singular design or insufficient observations). Try more data or fewer predictors.</div>`;
+        $("#mlrStepWrap").innerHTML = "";
+        $("#mlrFitWrap").innerHTML = "";
+        return;
+      }
+
+      $("#mlrStepWrap").innerHTML = `
+        <div class="muted small" style="margin-bottom:8px">
+          Stepwise search (add/drop one predictor at a time) minimizes AIC = n·ln(SSE/n) + 2k with k = number of estimated coefficients (intercept + slopes).
+        </div>
+        ${buildTable(
+          ["Stage", "AIC", "Note"],
+          [
+            ["After VIF screening (all remaining predictors)", aicAfterVif.toFixed(3), `${vifOut.names.length} predictor(s) in pool`],
+            ["After stepwise selection", aicFinal.toFixed(3), `${step.selectedNames.length} predictor(s) retained`],
+          ]
+        )}
+        <div style="height:8px"></div>
+        <div class="muted small">Selected predictors: ${step.selectedNames.length ? step.selectedNames.map((s) => qs(String(s))).join(", ") : "(none — intercept only)"}</div>
+      `;
+
+      const m = finalFit.m;
+      const rmse = Math.sqrt(finalFit.sse / Math.max(1, finalFit.n - finalFit.p));
+      $("#mlrKpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+          <div class="kpi"><div class="label">R²</div><div class="value">${finalFit.r2.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Adjusted R²</div><div class="value">${Number.isFinite(finalFit.r2adj) ? finalFit.r2adj.toFixed(4) : "—"}</div></div>
+          <div class="kpi"><div class="label">RMSE</div><div class="value">${rmse.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">n, p</div><div class="value">${finalFit.n}, ${finalFit.p}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">Overall F</div><div class="value">${m > 0 ? finalFit.fStat.toFixed(4) : "—"}</div></div>
+          <div class="kpi"><div class="label">F p-value (H₀: all slopes = 0)</div><div class="value">${m > 0 ? (finalFit.fP < 1e-4 ? "<0.0001" : finalFit.fP.toFixed(4)) : "—"}</div></div>
+        </div>
+      `;
+
+      drawQQPlotResiduals($("#mlrQQ"), finalFit.residuals, { title: "Normal Q-Q (residuals)" });
+      drawResidualsVsFittedPlot($("#mlrResFitted"), finalFit.fitted, finalFit.residuals, { title: "Residuals vs fitted values" });
+
+      const coefNames = ["Intercept", ...step.selectedNames.map((s) => String(s))];
+      const coefRows = finalFit.beta.map((b, i) => [coefNames[i] || `β${i}`, b.toFixed(6)]);
+
+      const anovaRows =
+        m > 0
+          ? [
+              ["Regression", finalFit.ssr, m, finalFit.ssr / m, finalFit.fStat, finalFit.fP],
+              ["Residual", finalFit.sse, finalFit.n - finalFit.p, finalFit.sse / Math.max(1, finalFit.n - finalFit.p), "", ""],
+              ["Total", finalFit.sst, finalFit.n - 1, "", "", ""],
+            ]
+          : [
+              ["Residual (intercept-only)", finalFit.sse, finalFit.n - 1, finalFit.sse / Math.max(1, finalFit.n - 1), "", ""],
+              ["Total", finalFit.sst, finalFit.n - 1, "", "", ""],
+            ];
+
+      $("#mlrFitWrap").innerHTML = `
+        ${buildTable(["Term", "Coefficient"], coefRows)}
+        <div style="height:12px"></div>
+        <div class="muted small" style="margin-bottom:6px">ANOVA (overall model)</div>
+        ${buildTable(
+          ["Source", "SS", "df", "MS", "F", "p-value"],
+          anovaRows.map((row) => row.map((c) => (typeof c === "number" ? (Number.isFinite(c) ? c.toFixed(6) : String(c)) : c)))
+        )}
+        <div style="height:10px"></div>
+        ${assumptionsChecklistHtml("Residual checks", [
+          { assumption: "Q-Q plot: approximate linearity", status: "Recommended", note: "Supports normality of residuals (large samples)." },
+          { assumption: "Residuals vs fitted: random scatter", status: "Recommended", note: "Fanning suggests heteroscedasticity." },
+        ])}
+      `;
+
+      const interpretation =
+        `Response: ${colNames[yIdx]} (${n} observations). Predictors after VIF screening: ${vifOut.names.length}; ` +
+        `stepwise retained ${step.selectedNames.length}.\n\n` +
+        `R² = ${finalFit.r2.toFixed(4)}, Adjusted R² = ${Number.isFinite(finalFit.r2adj) ? finalFit.r2adj.toFixed(4) : "n/a"}. ` +
+        (m > 0
+          ? `Overall F = ${finalFit.fStat.toFixed(4)} (df1=${m}, df2=${finalFit.n - finalFit.p}), p = ${finalFit.fP < 1e-4 ? "<0.0001" : finalFit.fP.toFixed(4)}. `
+          : "No slope terms in the final model. ") +
+        `\nAIC improved from ${aicAfterVif.toFixed(3)} (full VIF-clean) to ${aicFinal.toFixed(3)} (stepwise).`;
+
+      const deviationHtml = deviationBanner("mlr", { r2: finalFit.r2 }, ["r2"]);
+      setInterpretation("mlr", interpretation, deviationHtml || "", { r2: finalFit.r2 });
+      setRunMeta("mlr", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `n=${n}, predictors=${predNames.length}`,
+        standardization: "OLS (raw scale)",
+        preprocessing: `VIF≤${vifMax}; AIC stepwise`,
+        qualityScore: `${Math.min(100, 50 + Math.min(n, 25))} / 100`,
+      });
+    });
+
+    $("#mlrCompute").click();
+  }
+
+  // --- PCA (multivariate: correlation PCA) ---
+  function renderPCA() {
+    const title = "PCA (Principal Component Analysis)";
+    showContentHeader({
+      title,
+      subtitle:
+        "Z-score each column (unit variance), eigen decomposition of the correlation matrix, variance explained, scree plot, biplot, cos² on PC1–PC2.",
+    });
+
+    const defaultCsv = [
+      "V1,V2,V3,V4",
+      "2.1,3.2,1.5,4.0",
+      "2.3,3.0,1.6,4.2",
+      "2.0,3.4,1.4,3.9",
+      "2.4,2.9,1.7,4.1",
+      "2.2,3.1,1.5,4.3",
+      "2.5,3.3,1.6,4.0",
+      "2.1,3.0,1.8,4.1",
+      "2.3,3.2,1.5,3.8",
+      "2.4,3.1,1.7,4.2",
+      "2.0,3.3,1.4,4.0",
+      "2.2,2.8,1.6,4.1",
+      "2.3,3.4,1.5,4.2",
+    ].join("\n");
+
+    const bodyHtml = `
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Multivariate data matrix</h4>
+            <div class="muted small" style="margin-bottom:8px">Rows = observations; columns = variables. CSV (comma or tab). Non-numeric header rows are skipped automatically.</div>
+            <label>
+              Variable names (comma-separated, optional)
+              <input type="text" id="pcaNames" value="V1,V2,V3,V4" />
             </label>
             <label>
-              Trait 2 (Y)
-              <textarea id="pcaY">${Array.from({ length: defaultN }, (_, i) => (1.2 + i * 0.92 + (i % 3 === 0 ? -0.15 : 0.25)).toFixed(2)).join(", ")}</textarea>
+              Data matrix
+              <textarea id="pcaMatrix" rows="14" style="min-height:220px;font-family:ui-monospace,monospace">${defaultCsv}</textarea>
             </label>
-            <label class="pill"><input type="checkbox" id="pcaStandardize" checked /> Standardize traits before PCA</label>
+            <p class="note" style="margin:0">Analysis uses <strong>correlation PCA</strong>: each column is centered and scaled to <strong>unit variance</strong> before extracting components.</p>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="pcaCompute">Compute PCA</button>
             </div>
@@ -3938,8 +6681,11 @@
         <div>
           <div class="section" style="margin:0">
             <h4>Results</h4>
-            <div class="chart" style="height:260px;margin-top:12px">
-              <canvas id="pcaScatter" style="width:100%;height:100%"></canvas>
+            <div class="chart" style="height:220px;margin-top:8px">
+              <canvas id="pcaScree" style="width:100%;height:100%"></canvas>
+            </div>
+            <div class="chart" style="height:280px;margin-top:8px">
+              <canvas id="pcaBiplot" style="width:100%;height:100%"></canvas>
             </div>
             <div id="pcaTableWrap" style="margin-top:12px"></div>
           </div>
@@ -3956,134 +6702,101 @@
       prevCompareKeys: ["explained1"],
     });
 
-    function drawPCDirections(canvas, xs, ys, pc1, pc2) {
-      const pts = xs.map((x, i) => ({ x, y: ys[i] }));
-      drawScatterPlot(canvas, pts, { title: "PCA scatter with PC directions", xLabel: "Trait 1", yLabel: "Trait 2" });
-      const ctx = canvas.getContext("2d");
-      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
-      const rect = canvas.getBoundingClientRect();
-      const w = Math.max(320, Math.floor(rect.width));
-      const h = Math.max(240, Math.floor(rect.height));
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const rangeX = Math.max(1e-9, maxX - minX);
-      const rangeY = Math.max(1e-9, maxY - minY);
-      const cx = mean(xs);
-      const cy = mean(ys);
-      const center = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, cx, cy);
-      const arrowLenPx = 110;
-      function toPx(dx, dy) {
-        const endX = cx + dx;
-        const endY = cy + dy;
-        const end = projectScatterXY(w, h, true, minX, rangeX, minY, rangeY, endX, endY);
-        const vx = end.px - center.px;
-        const vy = end.py - center.py;
-        const mag = Math.sqrt(vx * vx + vy * vy) || 1;
-        const s = arrowLenPx / mag;
-        return { x2: center.px + vx * s, y2: center.py + vy * s };
-      }
-      const end1 = toPx(pc1.x * 1.0, pc1.y * 1.0);
-      const end2 = toPx(pc2.x * 1.0, pc2.y * 1.0);
-      drawArrow(ctx, center.px, center.py, end1.x2, end1.y2, CHART.accentAmber);
-      drawArrow(ctx, center.px, center.py, end2.x2, end2.y2, CHART.lineAlt);
-      ctx.fillStyle = CHART.accentAmber;
-      ctx.font = "800 12px Segoe UI, system-ui, sans-serif";
-      ctx.fillText("PC1", end1.x2 + 6, end1.y2 - 6);
-      ctx.fillStyle = CHART.lineAlt;
-      ctx.font = "800 12px Segoe UI, system-ui, sans-serif";
-      ctx.fillText("PC2", end2.x2 + 6, end2.y2 - 6);
-    }
-
-    function drawArrow(ctx, x1, y1, x2, y2, color) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-
-      // head
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      const headLen = 10;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(x2, y2);
-      ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
-      ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    $("#pcaCompute").addEventListener("click", () => {
+    $("#pcaCompute").onclick = () => {
       clearValidation("#contentBody");
       const errors = [];
-      const xs = parseGridNumbers($("#pcaX").value);
-      const ys = parseGridNumbers($("#pcaY").value);
-      const n = Math.min(xs.length, ys.length);
-      if (xs.length !== ys.length) {
-        errors.push(`PCA: Trait lengths differ (X=${xs.length}, Y=${ys.length}); first ${n} values will be used.`);
+      const txt = $("#pcaMatrix").value || "";
+      let mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) errors.push("PCA: paste a numeric matrix (≥3 rows, ≥2 columns).");
+      const n0 = mat.length;
+      const p0 = mat[0]?.length || 0;
+      for (let i = 0; i < n0; i++) {
+        if (!mat[i] || mat[i].length !== p0) {
+          errors.push(`PCA: inconsistent columns in row ${i + 1}.`);
+          break;
+        }
       }
-      if (n < 3) {
-        errors.push("PCA: provide at least 3 numeric observations per trait.");
-        markInvalidInput($("#pcaX"), "Need at least 3 numeric values");
-        markInvalidInput($("#pcaY"), "Need at least 3 numeric values");
-      }
+      if (n0 < 3) errors.push("PCA: need at least 3 observations (rows).");
+      if (p0 < 2) errors.push("PCA: need at least 2 variables (columns).");
       if (shouldBlockForValidation("pca", errors, "#pcaTableWrap")) return;
-      const x = xs.slice(0, n);
-      const y = ys.slice(0, n);
-      const std = !!$("#pcaStandardize")?.checked;
-      const Zxy = std ? zScoreColumns(x.map((v, i) => [v, y[i]])).Z : null;
-      const dataX = std ? Zxy.map((r) => r[0]) : x;
-      const dataY = std ? Zxy.map((r) => r[1]) : y;
 
-      const out = pca2D(dataX, dataY);
-      drawPCDirections($("#pcaScatter"), dataX, dataY, out.vec1, out.vec2);
-      const pcaOut = outlierFlags(dataX.concat(dataY));
+      const rawNames = ($("#pcaNames").value || "").split(",").map((s) => s.trim()).filter(Boolean);
+      const p = p0;
+      const varNames = Array.from({ length: p }, (_, j) => rawNames[j] || `V${j + 1}`);
 
-      const headers = ["Component", "Eigenvalue", "Explained Variance (%)", "Direction (normalized)"];
-      const rows = [
-        ["PC1", out.l1, out.explained1, `(${out.vec1.x.toFixed(4)}, ${out.vec1.y.toFixed(4)})`],
-        ["PC2", out.l2, out.explained2, `(${out.vec2.x.toFixed(4)}, ${out.vec2.y.toFixed(4)})`],
-      ];
+      const X = mat.map((row) => row.map((v) => (Number.isFinite(v) ? v : 0)));
+      const { Z } = zScoreColumns(X);
+      const out = pcaFromStandardizedZ(Z);
+      if (!out) {
+        $("#pcaTableWrap").innerHTML = `<p class="note">PCA could not run (check dimensions).</p>`;
+        return;
+      }
+
+      const n = out.n;
+      const scores12 = out.scores.map((row) => [row[0], row[1]]);
+      const load12 = out.loadings.map((row) => [row[0], row[1]]);
+
+      drawBarChart(
+        $("#pcaScree"),
+        out.vals.map((_, i) => `PC${i + 1}`),
+        out.vals,
+        { title: "Scree plot (eigenvalues λ of correlation matrix)" }
+      );
+      drawPcaBiplot($("#pcaBiplot"), scores12, load12, varNames, { title: "Biplot — scores (●) & variable loadings (arrows)" });
+
+      const flat = X.flat();
+      const pcaOut = outlierFlags(flat);
+      const pc1Pct = out.propPct[0] || 0;
       const qItemsPCA = [
-        { check: "Sample size adequacy", pass: n >= 5, note: `n=${n}` },
-        { check: "Outlier load (IQR)", pass: pcaOut.count <= Math.max(1, Math.floor((dataX.length + dataY.length) * 0.1)), note: `${pcaOut.count} flagged value(s).` },
-        { check: "PC1 information share", pass: out.explained1 >= 50, note: `PC1=${out.explained1.toFixed(2)}%` },
+        { check: "Sample size adequacy", pass: n >= 5, note: `n=${n}, p=${p}` },
+        { check: "Outlier load (IQR, pooled)", pass: pcaOut.count <= Math.max(1, Math.floor(flat.length * 0.1)), note: `${pcaOut.count} flagged cell(s).` },
+        { check: "PC1 variance share", pass: pc1Pct >= 20, note: `PC1=${pc1Pct.toFixed(1)}%` },
       ];
       if (strictModeShouldBlock("pca", qItemsPCA, "#pcaTableWrap")) return;
-      $("#pcaTableWrap").innerHTML = `${qualityScoreHtml(qItemsPCA)}<div style="height:10px"></div>${buildTable(headers, rows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
-        { assumption: "Numeric traits on comparable scale", status: "Recommended", note: "Standardize before PCA when scales differ strongly." },
-        { assumption: "Linear covariance structure", status: "Assumed", note: "PCA captures linear combinations of variation." },
-        { assumption: "Adequate sample spread", status: "Required", note: "Very low variance in a trait can destabilize components." }
+
+      const eigRows = out.vals.map((lam, k) => [`PC${k + 1}`, lam, out.propPct[k], out.cumPct[k]]);
+      const tEig = buildTable(["PC", "Eigenvalue λ", "Variance % (of total p)", "Cumulative %"], eigRows);
+
+      const cosRows = varNames.map((nm, j) => [nm, out.cos2[j].pc1, out.cos2[j].pc2, out.cos2[j].plane12]);
+      const tCos = buildTable(
+        ["Variable", "cos²(PC1) = r²", "cos²(PC2) = r²", "cos²(plane PC1+PC2)"],
+        cosRows
+      );
+
+      const maxLoadCols = Math.min(8, p);
+      const loadRows = out.loadings.map((row, j) => [varNames[j], ...row.slice(0, maxLoadCols)]);
+      const tLoad = buildTable(
+        ["Variable", ...Array.from({ length: maxLoadCols }, (_, k) => `Loading PC${k + 1}`)],
+        loadRows
+      );
+
+      $("#pcaTableWrap").innerHTML = `${qualityScoreHtml(qItemsPCA)}<div style="height:10px"></div><h4>Eigenvalues & variance explained</h4>${tEig}<div style="height:10px"></div><h4>Cos² — quality of representation (squared correlations)</h4><p class="note" style="margin:4px 0 8px">Loadings are correlations between each standardized variable and each PC. cos² = squared loading. On the PC1–PC2 plane: cos²(PC1)+cos²(PC2).</p>${tCos}<div style="height:10px"></div><h4>Loadings (variable–PC correlations)</h4>${tLoad}<div style="height:10px"></div>${assumptionsChecklistHtml("Assumption checklist", [
+        { assumption: "Linear correlation / covariance structure", status: "Assumed", note: "PCA uses second moments of standardized data." },
+        { assumption: "Adequate spread per variable", status: "Recommended", note: "Near-zero variance columns are unstable after scaling." },
       ])}`;
 
-      const deviationHtml = deviationBanner(
-        "pca",
-        { explained1: out.explained1 },
-        ["explained1"]
-      );
+      const deviationHtml = deviationBanner("pca", { explained1: pc1Pct }, ["explained1"]);
 
       const interpretation =
-        `PCA converts correlated traits into orthogonal principal components.\n\n` +
-        `Eigenvalues/variance:\n` +
-        `• PC1 explains ${out.explained1.toFixed(2)}% of the variance.\n` +
-        `• PC2 explains ${out.explained2.toFixed(2)}% of the remaining variance.\n\n` +
-        `Direction (loadings style):\n` +
-        `• PC1 direction ~ (${out.vec1.x.toFixed(3)}, ${out.vec1.y.toFixed(3)}): it indicates the dominant combined trend in Trait 1 (X) and Trait 2 (Y).\n` +
-        `• PC2 is orthogonal and captures smaller residual variation.\n\n` +
-        `In breeding context: if PC1 captures most variance, selections biased toward the PC1 trend tend to represent the main diversity pattern.`;
+        `Correlation PCA: each variable was z-scored (mean 0, variance 1), then principal components were extracted from the correlation matrix.\n\n` +
+        `• PC1 explains ${pc1Pct.toFixed(2)}% of total standardized variance (sum of eigenvalues = number of variables).\n` +
+        `• Use the scree plot to judge how many PCs to retain (look for an elbow).\n` +
+        `• Biplot: points are observation scores on PC1 vs PC2; arrows show variable loading directions (lengths scaled for display—relative geometry preserved).\n` +
+        `• cos² on the PC1–PC2 plane indicates how well each variable is represented in that 2D subspace.`;
 
-      setInterpretation(
-        "pca",
-        interpretation,
-        deviationHtml ? deviationHtml : "",
-        { explained1: out.explained1, l1: out.l1, l2: out.l2 }
-      );
-      setRunMeta("pca", { forceRun: isForceRunEnabled(), inputSize: `n=${n}, p=2`, standardization: std ? "z-score" : "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsPCA.map((x) => x.pass ? 100 : 45)))))} / 100` });
-    });
+      setInterpretation("pca", interpretation, deviationHtml || "", {
+        explained1: pc1Pct,
+        l1: out.vals[0],
+        l2: out.vals[1],
+      });
+      setRunMeta("pca", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `n=${n}, p=${p}`,
+        standardization: "z-score columns (unit variance)",
+        preprocessing: "Correlation matrix PCA",
+        qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsPCA.map((x) => (x.pass ? 100 : 45))))))} / 100`,
+      });
+    };
 
     $("#pcaCompute").click();
   }
@@ -4269,81 +6982,6 @@
       return { Rxx, rxy, errors };
     }
 
-    function drawPathDiagram({ names, yName, pCoeffs, Rxx, rxy, residual }) {
-      const svg = $("#pathSvg");
-      svg.innerHTML = "";
-
-      const W = 860;
-      const H = 360;
-      const leftX = 120;
-      const rightX = 740;
-      const top = 70;
-      const spacing = pCoeffs.length > 1 ? Math.min(70, 220 / (pCoeffs.length - 1)) : 0;
-      const xs = names.map((_, i) => ({ x: leftX, y: top + i * spacing }));
-      const yNode = { x: rightX, y: 180 };
-
-      svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-      svg.insertAdjacentHTML(
-        "beforeend",
-        `<defs>
-          <marker id="pArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-            <path d="M0,0 L10,5 L0,10 Z" fill="#d97706"></path>
-          </marker>
-          <marker id="gArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-            <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"></path>
-          </marker>
-        </defs>`
-      );
-
-      // draw inter-correlations among X as light lines (only show if |r|>=0.2)
-      for (let i = 0; i < names.length; i++) {
-        for (let j = i + 1; j < names.length; j++) {
-          const r = Rxx[i][j];
-          if (Math.abs(r) < 0.2) continue;
-          const a = xs[i];
-          const b = xs[j];
-          svg.insertAdjacentHTML(
-            "beforeend",
-            `<path d="M ${a.x + 40} ${a.y} L ${b.x + 40} ${b.y}" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#gArrow)"></path>
-             <text x="${a.x + 55}" y="${(a.y + b.y) / 2 - 6}" fill="#475569" font-size="12" font-weight="800">r=${r.toFixed(2)}</text>`
-          );
-        }
-      }
-
-      // draw nodes
-      xs.forEach((pt, i) => {
-        svg.insertAdjacentHTML(
-          "beforeend",
-          `<rect x="${pt.x - 80}" y="${pt.y - 24}" width="160" height="48" rx="16" fill="rgba(13,148,136,0.12)" stroke="#c5cdd8"></rect>
-           <text x="${pt.x}" y="${pt.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="900">${qs(names[i])}</text>`
-        );
-      });
-      svg.insertAdjacentHTML(
-        "beforeend",
-        `<rect x="${yNode.x - 90}" y="${yNode.y - 26}" width="180" height="52" rx="16" fill="rgba(217,119,6,0.12)" stroke="#c5cdd8"></rect>
-         <text x="${yNode.x}" y="${yNode.y + 6}" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="950">${qs(yName)}</text>
-         <text x="${yNode.x}" y="${yNode.y + 32}" text-anchor="middle" fill="#64748b" font-size="12" font-weight="800">Residual=${residual.toFixed(3)}</text>`
-      );
-
-      // arrows from X -> Y with direct effects
-      xs.forEach((pt, i) => {
-        const p = pCoeffs[i];
-        const startX = pt.x + 80;
-        const startY = pt.y;
-        const endX = yNode.x - 90;
-        const endY = yNode.y + (i - (xs.length - 1) / 2) * 12;
-        const midX = (startX + endX) / 2;
-        const midY = (startY + endY) / 2;
-        const col = p >= 0 ? "#0d9488" : "#dc2626";
-        svg.insertAdjacentHTML(
-          "beforeend",
-          `<path d="M ${startX} ${startY} C ${startX + 110} ${startY}, ${endX - 120} ${endY}, ${endX} ${endY}" stroke="${col}" stroke-width="4" fill="none" marker-end="url(#pArrow)"></path>
-           <text x="${midX}" y="${midY - 8}" fill="${col}" font-size="13" font-weight="950">p=${p.toFixed(3)}</text>
-           <text x="${midX}" y="${midY + 10}" fill="#64748b" font-size="12" font-weight="800">r=${rxy[i].toFixed(2)}</text>`
-        );
-      });
-    }
-
     $("#pathCompute").addEventListener("click", () => {
       const p = Math.max(2, Math.min(6, Number($("#pathP").value || defaultP)));
       const names = cleanNames(p);
@@ -4351,8 +6989,8 @@
 
       const { Rxx, rxy, errors } = readCorrelationInputs(p);
       if (shouldBlockForValidation("path", errors, "#pathKpis")) return;
-      const inv = invertMatrix(Rxx);
-      if (!inv) {
+      const out = computeStandardizedPathModel(Rxx, rxy);
+      if (!out.ok) {
         $("#pathKpis").innerHTML = `<div class="note">Matrix inversion failed. Check correlations (matrix may be singular).</div>`;
         $("#pathTables").innerHTML = "";
         $("#pathSvg").innerHTML = "";
@@ -4364,29 +7002,10 @@
         );
         return;
       }
-
-      // Direct effects (standardized path coefficients): P = inv(Rxx) * rxy
-      const P = matVecMul(inv, rxy);
-
-      // Indirect effects: via j is r_ij * Pj
-      const indirect = Array.from({ length: p }, () => Array(p).fill(0));
-      for (let i = 0; i < p; i++) {
-        for (let j = 0; j < p; j++) {
-          if (i === j) continue;
-          indirect[i][j] = Rxx[i][j] * P[j];
-        }
-      }
-
-      // Reproduced correlations and residual effect
-      const reproduced = [];
-      let sum_rp = 0;
-      for (let i = 0; i < p; i++) {
-        let rep = P[i]; // direct
-        for (let j = 0; j < p; j++) if (i !== j) rep += Rxx[i][j] * P[j];
-        reproduced.push(rep);
-        sum_rp += rxy[i] * P[i];
-      }
-      const residual = Math.sqrt(clamp01(1 - sum_rp));
+      const P = out.P;
+      const indirect = out.indirect;
+      const reproduced = out.reproduced;
+      const residual = out.residual;
 
       // KPIs
       const maxAbs = Math.max(...P.map((x) => Math.abs(x)));
@@ -4400,7 +7019,7 @@
         </div>
       `;
 
-      drawPathDiagram({ names, yName, pCoeffs: P, Rxx, rxy, residual });
+      renderPathDiagramSvg($("#pathSvg"), { names, yName, pCoeffs: P, Rxx, rxy, residual });
 
       // Table 1: Direct effects
       const t1 = buildTable(
@@ -4441,12 +7060,268 @@
     $("#pathCompute").click();
   }
 
+  // --- Correlation matrices (phenotypic + genotypic) + path analysis from data ---
+  function renderCorrelationPath() {
+    const title = "Correlation & Path (Phenotypic / Genotypic)";
+    showContentHeader({
+      title,
+      subtitle:
+        "Pearson correlation matrices with two-tailed p-values; genotypic R among genotype means; path coefficients (direct/indirect) and residual effect on a chosen response trait.",
+    });
+
+    const sampleCPA = `Genotype,Height,Yield,Grain_wt,Protein
+G1,1.20,42.1,2.45,12.1
+G1,1.28,41.5,2.40,12.0
+G2,1.15,38.2,2.30,12.0
+G2,1.18,38.5,2.32,11.9
+G3,1.22,44.0,2.50,12.2
+G3,1.25,43.5,2.48,12.1
+G4,1.10,35.0,2.20,11.8
+G4,1.12,35.8,2.22,11.7`;
+
+    const bodyHtml = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="label">Phenotypic</div><div class="value">Plot-level r</div></div>
+        <div class="kpi"><div class="label">Genotypic</div><div class="value">Means by genotype</div></div>
+        <div class="kpi"><div class="label">Path</div><div class="value">Direct + indirect + U</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Trait matrix</h4>
+            <div class="muted small" style="margin-bottom:8px">
+              Rows = plots or lines; columns = quantitative traits. Optional header row: first column = genotype ID (text), remaining columns = traits.
+              If all cells are numeric, rows are labeled G1…Gn (one observation per row = phenotypic and genotypic matrices coincide unless you repeat genotypes).
+            </div>
+            <label>
+              Data
+              <textarea id="cpaData" rows="14" style="width:100%;font-family:ui-monospace,monospace;font-size:12px">${sampleCPA}</textarea>
+            </label>
+            <div class="input-grid" style="margin-top:10px">
+              <label>
+                Target trait (Y)
+                <select id="cpaTarget"></select>
+              </label>
+              <label>
+                Path model uses
+                <select id="cpaPathBasis">
+                  <option value="pheno">Phenotypic correlations</option>
+                  <option value="geno">Genotypic correlations</option>
+                </select>
+              </label>
+            </div>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="cpaCompute">Compute matrices & path</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Path diagram</h4>
+            <div class="chart" style="height:320px;margin-top:8px;display:grid;place-items:center">
+              <svg id="cpaSvg" data-exportable="1" viewBox="0 0 860 360" width="100%" height="100%" style="overflow:visible"></svg>
+            </div>
+            <div id="cpaKpis"></div>
+          </div>
+        </div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>Phenotypic correlation &amp; p-values</h4>
+        <div id="cpaPhenoWrap"></div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>Genotypic correlation &amp; p-values</h4>
+        <div class="muted small" style="margin-bottom:8px" id="cpaGenoNote"></div>
+        <div id="cpaGenoWrap"></div>
+      </div>
+      <div class="section" style="margin-top:12px">
+        <h4>Path analysis (partition of r with Y)</h4>
+        <div id="cpaPathWrap"></div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "corpath",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["residual"],
+    });
+
+    function correlationPairTables(R, Pv, names, nObs, labelR, labelP) {
+      const hdr = ["Trait", ...names];
+      const rowsR = names.map((nm, i) => [nm, ...R[i].map((v) => (Number.isFinite(v) ? v.toFixed(4) : "—"))]);
+      const rowsP = names.map((nm, i) => [
+        nm,
+        ...Pv[i].map((pv, j) => (i === j ? "—" : formatCorrelationPValueCell(pv))),
+      ]);
+      return (
+        `<div class="muted small">${qs(labelR)} (n = ${nObs})</div>` +
+        buildTable(hdr, rowsR) +
+        `<div style="height:8px"></div><div class="muted small">${qs(labelP)} — two-tailed, H₀: ρ = 0; df = n − 2 for off-diagonal.</div>` +
+        buildTable(hdr, rowsP)
+      );
+    }
+
+    $("#cpaCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      const errors = [];
+      const parsed = parseBiometricTraitMatrix($("#cpaData").value);
+      if (parsed.error) {
+        errors.push(`Correlation & Path: ${parsed.error}`);
+        markInvalidInput($("#cpaData"), parsed.error);
+      }
+      if (shouldBlockForValidation("corpath", errors, "#cpaPhenoWrap")) return;
+
+      const { rowNames, colNames, data: X0 } = parsed;
+      const nPlots = X0.length;
+      const pTraits = colNames.length;
+      if (nPlots < 3) {
+        errors.push("Need at least 3 observations (rows) for correlation inference.");
+        markInvalidInput($("#cpaData"), "At least 3 rows required");
+      }
+      if (pTraits < 2) {
+        errors.push("Need at least 2 trait columns.");
+        markInvalidInput($("#cpaData"), "At least 2 trait columns");
+      }
+      if (shouldBlockForValidation("corpath", errors, "#cpaPhenoWrap")) return;
+
+      const sel = $("#cpaTarget");
+      const prev = (sel.value || "").trim();
+      sel.innerHTML = colNames.map((n) => `<option value="${qs(n)}">${qs(n)}</option>`).join("");
+      const prevIdx = colNames.findIndex((c) => c === prev);
+      const yieldGuess = colNames.findIndex((c) => String(c).toLowerCase().includes("yield"));
+      const yIndex = prevIdx >= 0 ? prevIdx : yieldGuess >= 0 ? yieldGuess : colNames.length - 1;
+      sel.selectedIndex = yIndex;
+
+      const Rp = pearsonCorrelationMatrix(X0);
+      const Pp = buildCorrelationPValueMatrix(Rp, nPlots);
+
+      const agg = aggregateTraitMeansByGenotype(rowNames, X0);
+      const Xg = agg.means;
+      const nGeno = Xg.length;
+      const Rg = pearsonCorrelationMatrix(Xg);
+      const Pg = buildCorrelationPValueMatrix(Rg, nGeno);
+
+      $("#cpaPhenoWrap").innerHTML = correlationPairTables(
+        Rp,
+        Pp,
+        colNames,
+        nPlots,
+        "Phenotypic Pearson r (plot observations)",
+        "Significance (p-values)"
+      );
+
+      const genoNote = $("#cpaGenoNote");
+      genoNote.innerHTML = `Genotypic correlations are computed among genotype means (averaging rows that share the same genotype label). Number of genotype levels = ${nGeno}.`;
+      $("#cpaGenoWrap").innerHTML = correlationPairTables(
+        Rg,
+        Pg,
+        colNames,
+        nGeno,
+        "Genotypic Pearson r (genotype means)",
+        "Significance (p-values)"
+      );
+
+      const basis = $("#cpaPathBasis").value === "geno" ? "geno" : "pheno";
+      const Ruse = basis === "geno" ? Rg : Rp;
+      const nUse = basis === "geno" ? nGeno : nPlots;
+      const yName = colNames[yIndex];
+      const predIdx = colNames.map((_, i) => i).filter((i) => i !== yIndex);
+      if (!predIdx.length) {
+        $("#cpaKpis").innerHTML = `<div class="note">Select a target trait that is not the only column.</div>`;
+        $("#cpaPathWrap").innerHTML = "";
+        $("#cpaSvg").innerHTML = "";
+        return;
+      }
+
+      const { Rxx, rxy } = pathInputsFromFullCorrelation(Ruse, yIndex, predIdx);
+      const pathOut = computeStandardizedPathModel(Rxx, rxy);
+      const predNames = predIdx.map((i) => colNames[i]);
+
+      if (!pathOut.ok) {
+        $("#cpaKpis").innerHTML = `<div class="note">Path analysis failed: predictor correlation matrix is singular. Try fewer traits or a different target.</div>`;
+        $("#cpaPathWrap").innerHTML = "";
+        $("#cpaSvg").innerHTML = "";
+        setInterpretation(
+          "corpath",
+          "Could not invert the predictor correlation matrix for path analysis. Traits may be linearly dependent.",
+          "",
+          null
+        );
+        return;
+      }
+
+      const P = pathOut.P;
+      const indirect = pathOut.indirect;
+      const reproduced = pathOut.reproduced;
+      const residual = pathOut.residual;
+
+      $("#cpaKpis").innerHTML = `
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr));margin-top:10px">
+          <div class="kpi"><div class="label">Basis</div><div class="value">${basis === "geno" ? "Genotypic" : "Phenotypic"}</div></div>
+          <div class="kpi"><div class="label">n for path</div><div class="value">${nUse}</div></div>
+          <div class="kpi"><div class="label">Residual U</div><div class="value">${residual.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Predictors</div><div class="value">${predNames.length}</div></div>
+        </div>
+      `;
+
+      renderPathDiagramSvg($("#cpaSvg"), { names: predNames, yName, pCoeffs: P, Rxx, rxy, residual });
+
+      const t1 = buildTable(
+        ["Predictor", "Direct effect (p_iY)", `r(i, ${yName})`],
+        predNames.map((nm, i) => [nm, P[i], rxy[i]])
+      );
+      const indHeaders = ["Predictor", ...predNames.map((n) => `via ${n}`), "Total indirect", `Reproduced r(i,${yName})`];
+      const indRows = predNames.map((nm, i) => {
+        const via = predNames.map((_, j) => (i === j ? 0 : indirect[i][j]));
+        const totalInd = via.reduce((a, b) => a + b, 0);
+        return [nm, ...via, totalInd, reproduced[i]];
+      });
+      const t2 = buildTable(indHeaders, indRows);
+      const t3 = buildTable(
+        ["Predictor", `Observed r(i,${yName})`, `Reproduced r(i,${yName})`, "Difference"],
+        predNames.map((nm, i) => [nm, rxy[i], reproduced[i], reproduced[i] - rxy[i]])
+      );
+
+      $("#cpaPathWrap").innerHTML = `
+        <div class="muted small" style="margin-bottom:8px">
+          Standardized path coefficients: <strong>P = R<sub>xx</sub><sup>−1</sup> r<sub>xY</sub></strong>, with R taken from <strong>${basis === "geno" ? "genotypic" : "phenotypic"}</strong> correlations.
+          Residual path <strong>U = √(1 − Σ r(i,Y)·p_iY)</strong> captures unexplained variation in the causal system.
+        </div>
+        ${t1}<div style="height:10px"></div>${t2}<div style="height:10px"></div>${t3}
+      `;
+
+      const deviationHtml = deviationBanner("corpath", { residual }, ["residual"]);
+      const interpretation =
+        `Phenotypic correlations use all ${nPlots} plot-level observations; p-values use df = n − 2 per pair.\n` +
+        `Genotypic correlations use ${nGeno} genotype means (labels from the first column or row order).\n\n` +
+        `Path analysis on ${yName} uses ${basis === "geno" ? "genotypic" : "phenotypic"} correlations among predictors and with Y. ` +
+        `Residual effect U = ${residual.toFixed(3)} (unexplained correlation structure). ` +
+        `Compare reproduced vs observed r(i,Y) to judge whether the additive path model fits.`;
+
+      setInterpretation("corpath", interpretation, deviationHtml || "", { residual });
+      setRunMeta("corpath", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `plots=${nPlots}, genotypes=${nGeno}, traits=${pTraits}`,
+        standardization: "correlation-based path (standardized)",
+        preprocessing: `Target=${yName}; basis=${basis}`,
+        qualityScore: `${Math.min(100, 55 + Math.min(nPlots, 30))} / 100`,
+      });
+    });
+
+    $("#cpaCompute").click();
+  }
+
   // --- Line x Tester (calculator) ---
   function renderLineTester() {
     const title = "Line x Tester Design (Calculator)";
     showContentHeader({
       title,
-      subtitle: "Compute Line, Tester, and Line×Tester effects (ANOVA style), with GCA/SCA tables and cross ranking.",
+      subtitle:
+        "RCBD-style partition: Replication, Lines, Testers, L×T, Error; optional check contrast; GCA/SCA with SE, variance %, genetic advance, and potence ratio.",
     });
 
     const defaultL = 3;
@@ -4455,9 +7330,9 @@
 
     const bodyHtml = `
       <div class="kpi-row">
-        <div class="kpi"><div class="label">Design</div><div class="value">Line x Tester with replications</div></div>
-        <div class="kpi"><div class="label">Effects</div><div class="value">GCA (Line/Tester) + SCA (Cross)</div></div>
-        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA + ranked crosses</div></div>
+        <div class="kpi"><div class="label">Design</div><div class="value">Line × Tester × Reps</div></div>
+        <div class="kpi"><div class="label">Partition</div><div class="value">Rep + Line + Tester + L×T (+Check)</div></div>
+        <div class="kpi"><div class="label">Outputs</div><div class="value">ANOVA, SE, GA, potence</div></div>
       </div>
 
       <div style="height:12px"></div>
@@ -4481,17 +7356,26 @@
                 Replications (r)
                 <input type="number" min="2" id="ltR" value="${defaultR}" />
               </label>
+              <label>
+                Selection intensity (k) for genetic advance
+                <input type="number" min="0" step="0.01" id="ltSelK" value="2.06" title="e.g. 2.06 for top 5% selection" />
+              </label>
+              <label>
+                Optional check cultivars (0 = none, 1 = one check with r plot values)
+                <input type="number" min="0" max="1" id="ltNumChecks" value="0" />
+              </label>
+              <div id="ltCheckWrap" class="note" style="margin:0;display:none"></div>
               <button class="action-btn primary2" type="button" id="ltBuild">Build grid</button>
               <div class="note" style="margin:0">
-                Rows are crosses (L<sub>i</sub>xT<sub>j</sub>), columns are replications (R1..Rr).
+                Rows are crosses (L<sub>i</sub>×T<sub>j</sub>), columns are replications (R1..Rr). Blocks = replications. Optional check is analyzed as a contrast vs hybrid mean (not pooled into factorial SS).
               </div>
             </div>
             <div id="ltGridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="ltCompute">Compute Line x Tester</button>
-              <button class="action-btn" type="button" id="ltImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="ltImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="ltTemplateCsv">Download template CSV</button>
-              <input type="file" id="ltCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="ltCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -4514,8 +7398,24 @@
       subtitle: "",
       bodyHtml,
       payloadForPrevComparison: { interpretation: "", storePrev: null },
-      prevCompareKeys: ["fLine", "fTester", "fLT"],
+      prevCompareKeys: ["fLine", "fTester", "fLT", "potence", "gaPct"],
     });
+
+    function refreshCheckInputs() {
+      const wrap = $("#ltCheckWrap");
+      if (!wrap) return;
+      const nc = Math.max(0, Math.min(1, Number($("#ltNumChecks")?.value || 0)));
+      const r = Math.max(2, Number($("#ltR")?.value || defaultR));
+      if (nc < 1) {
+        wrap.style.display = "none";
+        wrap.innerHTML = "";
+        return;
+      }
+      wrap.style.display = "block";
+      const cells = [];
+      for (let k = 0; k < r; k++) cells.push(`<label style="display:inline-block;margin-right:8px">R${k + 1} <input type="number" step="0.01" id="ltCheckR${k}" value="${(18 + k * 0.5).toFixed(2)}" /></label>`);
+      wrap.innerHTML = `<div class="note" style="margin:0">Check variety — plot values (same reps as experiment):</div><div style="margin-top:6px">${cells.join("")}</div>`;
+    }
 
     function buildGrid(l, t, r) {
       const wrap = $("#ltGridWrap");
@@ -4547,13 +7447,17 @@
     }
 
     buildGrid(defaultL, defaultT, defaultR);
+    refreshCheckInputs();
 
     $("#ltBuild").addEventListener("click", () => {
       const l = Math.max(2, Number($("#ltL").value || defaultL));
       const t = Math.max(2, Number($("#ltT").value || defaultT));
       const r = Math.max(2, Number($("#ltR").value || defaultR));
       buildGrid(l, t, r);
+      refreshCheckInputs();
     });
+    $("#ltNumChecks")?.addEventListener("change", refreshCheckInputs);
+    $("#ltR")?.addEventListener("change", refreshCheckInputs);
 
     $("#ltTemplateCsv").addEventListener("click", () => {
       const l = Math.max(2, Number($("#ltL").value || defaultL));
@@ -4572,7 +7476,13 @@
     $("#ltCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       const totalRows = mat.length;
@@ -4600,6 +7510,7 @@
       const l = Math.max(2, Number($("#ltL").value || defaultL));
       const t = Math.max(2, Number($("#ltT").value || defaultT));
       const r = Math.max(2, Number($("#ltR").value || defaultR));
+      const kSel = Math.max(0, Number($("#ltSelK")?.value || 2.06));
 
       // y[i][j][k]
       const y = [];
@@ -4665,11 +7576,13 @@
       const dfError = (r - 1) * (l * t - 1);
       const dfTotal = N - 1;
 
+      const msRep = ssRep / Math.max(1, dfRep);
       const msLine = ssLine / dfLine;
       const msTester = ssTester / dfTester;
-      const msLT = ssLT / dfLT;
+      const msLT = dfLT > 0 ? ssLT / dfLT : 0;
       const msError = ssError / dfError;
 
+      const fRep = msError === 0 ? 0 : msRep / msError;
       const fLine = msError === 0 ? 0 : msLine / msError;
       const fTester = msError === 0 ? 0 : msTester / msError;
       const fLT = msError === 0 ? 0 : msLT / msError;
@@ -4693,13 +7606,41 @@
         }
       }
 
+      const pct = lineTesterHybridVariancePct(ssLine, ssTester, ssLT);
+      const se = lineTesterSEs(msError, r, l, t);
+      const ga = lineTesterGeneticAdvance(msLine, msError, r, t, grandMean, kSel);
+      const pot = lineTesterPotenceRatio(msLine, msTester, msLT, msError, r, l, t);
+
+      const nc = Math.max(0, Math.min(1, Number($("#ltNumChecks")?.value || 0)));
+      let checkContrast = null;
+      let fCheck = "";
+      let sigCheck = { level: "", note: "" };
+      if (nc >= 1) {
+        const chk = [];
+        for (let k = 0; k < r; k++) {
+          const v = Number(document.querySelector(`#ltCheckR${k}`)?.value ?? NaN);
+          chk.push(Number.isFinite(v) ? v : 0);
+        }
+        const meanCheck = mean(chk);
+        checkContrast = lineTesterCheckContrastSS(meanCheck, grandMean, r, l, t);
+        fCheck = msError === 0 ? 0 : checkContrast.ms / msError;
+        sigCheck = approxFSignificance(fCheck, 1, dfError);
+      }
+
       $("#ltKpis").innerHTML = `
         <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
           <div class="kpi"><div class="label">F(Line)</div><div class="value">${fLine.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">F(Tester)</div><div class="value">${fTester.toFixed(4)}</div></div>
-          <div class="kpi"><div class="label">F(LxT)</div><div class="value">${fLT.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">F(L×T)</div><div class="value">${fLT.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">MS Error</div><div class="value">${msError.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">Grand mean</div><div class="value">${grandMean.toFixed(3)}</div></div>
+        </div>
+        <div class="kpi-row" style="margin-top:8px;grid-template-columns:repeat(5, minmax(0,1fr))">
+          <div class="kpi"><div class="label">% SS Lines</div><div class="value">${pct.pLine.toFixed(1)}%</div></div>
+          <div class="kpi"><div class="label">% SS Testers</div><div class="value">${pct.pTester.toFixed(1)}%</div></div>
+          <div class="kpi"><div class="label">% SS L×T</div><div class="value">${pct.pLT.toFixed(1)}%</div></div>
+          <div class="kpi"><div class="label">Potence ratio</div><div class="value">${pot.potence.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Genetic advance %</div><div class="value">${ga.gaPct.toFixed(2)}%</div></div>
         </div>
       `;
 
@@ -4710,50 +7651,96 @@
       const top = rankedCross.slice(0, Math.min(10, rankedCross.length));
       drawBarChart($("#ltBar"), top.map((x) => x.cross), top.map((x) => x.mean), { title: "Top cross means" });
 
-      const anova = buildTable(
-        ["Source", "SS", "df", "MS", "F", "Approx. Sig."],
+      const anovaRows = [
+        ["Replications (blocks)", ssRep, dfRep, msRep, fRep, ""],
+        ["Lines", ssLine, dfLine, msLine, fLine, sigLine.level],
+        ["Testers", ssTester, dfTester, msTester, fTester, sigTester.level],
+        ["Line×Tester", ssLT, dfLT, msLT, fLT, sigLT.level],
+      ];
+      if (checkContrast) {
+        anovaRows.push(["Check vs hybrid mean (contrast)", checkContrast.ss, checkContrast.df, checkContrast.ms, fCheck, sigCheck.level]);
+      }
+      anovaRows.push(["Error", ssError, dfError, msError, "", ""]);
+      anovaRows.push(["Total", ssTotal, dfTotal, "", "", ""]);
+
+      const anova = buildTable(["Source", "SS", "df", "MS", "F", "Approx. Sig."], anovaRows);
+
+      const pctTable = buildTable(
+        ["Hybrid factorial SS", "% of subtotal", "SS"],
         [
-          ["Replications", ssRep, dfRep, ssRep / dfRep, "", ""],
-          ["Lines", ssLine, dfLine, msLine, fLine, sigLine.level],
-          ["Testers", ssTester, dfTester, msTester, fTester, sigTester.level],
-          ["Line×Tester", ssLT, dfLT, msLT, fLT, sigLT.level],
-          ["Error", ssError, dfError, msError, "", ""],
-          ["Total", ssTotal, dfTotal, "", "", ""],
+          ["Lines", pct.pLine, ssLine],
+          ["Testers", pct.pTester, ssTester],
+          ["Line×Tester", pct.pLT, ssLT],
+          ["Subtotal (Lines+Testers+L×T)", 100, pct.sum],
         ]
       );
 
       const gcaLineTable = buildTable(
-        ["Line", "Line mean", "GCA effect"],
-        lineMeans.map((m, i) => [`L${i + 1}`, m, gcaLine[i]])
+        ["Line", "Line mean", "ĜCA (line)", "SE"],
+        lineMeans.map((m, i) => [`L${i + 1}`, m, gcaLine[i], se.seLineGca])
       );
       const gcaTesterTable = buildTable(
-        ["Tester", "Tester mean", "GCA effect"],
-        testerMeans.map((m, j) => [`T${j + 1}`, m, gcaTester[j]])
+        ["Tester", "Tester mean", "ĜCA (tester)", "SE"],
+        testerMeans.map((m, j) => [`T${j + 1}`, m, gcaTester[j], se.seTesterGca])
       );
 
       const scaRows = [];
       for (let i = 0; i < l; i++) {
         for (let j = 0; j < t; j++) {
-          scaRows.push([`L${i + 1}xT${j + 1}`, crossMeans[i][j], sca[i][j]]);
+          scaRows.push([`L${i + 1}xT${j + 1}`, crossMeans[i][j], sca[i][j], se.seSca]);
         }
       }
       scaRows.sort((a, b) => b[1] - a[1]);
-      const scaTable = buildTable(["Cross", "Cross mean", "SCA effect"], scaRows);
+      const scaTable = buildTable(["Cross", "Cross mean", "SCA", "SE(SCA)"], scaRows);
 
-      $("#ltTables").innerHTML = `${anova}<div style="height:10px"></div>${gcaLineTable}<div style="height:10px"></div>${gcaTesterTable}<div style="height:10px"></div>${scaTable}`;
+      const tExtra = buildTable(
+        ["Parameter", "Value"],
+        [
+          ["SE (line ĜCA), common", se.seLineGca],
+          ["SE (tester ĜCA), common", se.seTesterGca],
+          ["SE (cross mean)", se.seCrossMean],
+          ["SE (SCA) — balanced factorial", se.seSca],
+          ["σ² GCA (lines), random", pot.sigmaGcaLine2],
+          ["σ² GCA (testers), random", pot.sigmaGcaTester2],
+          ["σ² SCA, random", pot.sigmaSca2],
+          ["Potence ratio √(σ²_SCA / (2 σ²_GCA_line σ²_GCA_tester))", pot.potence],
+          ["MS_LT / (MS_Line + MS_Tester) (screen)", pot.altRatio],
+          ["Genetic advance (absolute, same units)", ga.gaAbs],
+          ["Genetic advance (% of grand mean)", ga.gaPct],
+          ["σ_p (line phenotypic SD, from MS_Line)", ga.sigmaP],
+          ["h² on line means (MS−MSE)/MS_Line", ga.h2],
+          ["Selection intensity k", kSel],
+        ]
+      );
+
+      $("#ltTables").innerHTML = `${anova}<div style="height:10px"></div>${pctTable}<div style="height:10px"></div>${gcaLineTable}<div style="height:10px"></div>${gcaTesterTable}<div style="height:10px"></div>${scaTable}<div style="height:10px"></div>${tExtra}`;
 
       const deviationHtml = deviationBanner("linetester", { fLine, fTester, fLT }, ["fLine", "fTester", "fLT"]);
       const best = rankedCross[0];
       const interpretation =
-        `Line x Tester analysis partitions variability into line (GCA-lines), tester (GCA-testers), and line×tester (SCA) components.\n\n` +
+        `Line × Tester analysis (RCBD: replications = blocks) partitions hybrid variance into Lines, Testers, and L×T.\n\n` +
+        `Variance % of hybrid factorial SS: Lines ${pct.pLine.toFixed(1)}%, Testers ${pct.pTester.toFixed(1)}%, L×T ${pct.pLT.toFixed(1)}%.\n\n` +
         `F tests (approx):\n` +
         `• Lines: F=${fLine.toFixed(4)} (${sigLine.note})\n` +
         `• Testers: F=${fTester.toFixed(4)} (${sigTester.note})\n` +
         `• Line×Tester: F=${fLT.toFixed(4)} (${sigLT.note})\n\n` +
+        `Potence ratio ${pot.potence.toFixed(4)} (higher = larger non-additive interaction relative to GCA-type variance); ` +
+        `screen ratio MS_LT/(MS_L+MS_T) = ${pot.altRatio.toFixed(4)}.\n` +
+        `Genetic advance ≈ ${ga.gaPct.toFixed(2)}% of mean (k=${kSel}, σ_p from line MS).\n\n` +
         `Best cross by mean: ${best.cross} (mean=${best.mean.toFixed(3)}, SCA=${best.sca.toFixed(3)}).\n` +
-        `High positive GCA suggests additive gene effects; high positive SCA suggests non-additive effects for specific crosses.`;
+        (checkContrast
+          ? `Check contrast vs hybrid mean: ${sigCheck.note}\n`
+          : "") +
+        `SE uses pooled MSE; check contrast is approximate if checks are not in the same blocking layout.`;
 
-      setInterpretation("linetester", interpretation, deviationHtml || "", { fLine, fTester, fLT, bestMean: best.mean });
+      setInterpretation("linetester", interpretation, deviationHtml || "", {
+        fLine,
+        fTester,
+        fLT,
+        bestMean: best.mean,
+        potence: pot.potence,
+        gaPct: ga.gaPct,
+      });
     });
 
     $("#ltCompute").click();
@@ -4793,9 +7780,9 @@
             <div id="dgInputWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="dgCompute">Draw graphical approach</button>
-              <button class="action-btn" type="button" id="dgImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="dgImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="dgTemplateCsv">Download template CSV</button>
-              <input type="file" id="dgCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="dgCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -4975,7 +7962,13 @@
     $("#dgCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const rows = parseCsv(txt);
       if (rows.length < 2) return;
       const data = rows.slice(1);
@@ -5022,32 +8015,47 @@
       <div class="two-col">
         <div>
           <div class="section" style="margin:0">
-            <h4>Diallel matrix input</h4>
+            <h4>Diallel matrix input (Griffing)</h4>
             <div class="input-grid">
               <label>
                 Number of parents (p)
                 <input type="number" min="3" max="10" id="da1N" value="${defaultN}" />
               </label>
               <label>
-                Genetic model assumption
-                <select id="da1Model">
-                  <option value="fixed-with-reciprocal">Fixed + reciprocal included</option>
-                  <option value="fixed-no-reciprocal">Fixed + no reciprocal term</option>
-                  <option value="random-with-reciprocal">Random + reciprocal included</option>
-                  <option value="random-no-reciprocal">Random + no reciprocal term</option>
+                Griffing method
+                <select id="da1Griffing">
+                  <option value="1">Method 1 — Full diallel (parents + all F1 reciprocals)</option>
+                  <option value="2">Method 2 — Parents + half diallel (one F1 per pair)</option>
+                  <option value="3">Method 3 — F1 only (both reciprocals, no parents)</option>
+                  <option value="4">Method 4 — Half diallel F1s only (no parents)</option>
                 </select>
+              </label>
+              <label>
+                Model (GCA/SCA inference)
+                <select id="da1ModelType">
+                  <option value="fixed">Fixed (effects)</option>
+                  <option value="random">Random (variance components)</option>
+                </select>
+              </label>
+              <label>
+                Replicates per plot (r)
+                <input type="number" min="1" max="999" id="da1Reps" value="1" />
+              </label>
+              <label>
+                Optional MSE (error mean square)
+                <input type="text" id="da1Mse" placeholder="Leave blank if unknown" />
               </label>
               <button class="action-btn primary2" type="button" id="da1Build">Build matrix</button>
               <div class="note" style="margin:0">
-                Enter means for all cells (including diagonal parents and reciprocal entries if available).
+                Matrix layout follows the selected method: Method 1 = full p×p; Method 2 = parents on diagonal + upper triangle (lower mirrors); Method 3 = off-diagonal only; Method 4 = upper triangle crosses only (diagonal unused).
               </div>
             </div>
             <div id="da1GridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="da1Compute">Compute DA I</button>
-              <button class="action-btn" type="button" id="da1ImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="da1ImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="da1TemplateCsv">Download template CSV</button>
-              <input type="file" id="da1CsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="da1CsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
               <button class="action-btn" type="button" id="da1BackGraph">Back to graphical approach</button>
             </div>
           </div>
@@ -5079,9 +8087,24 @@
       prevCompareKeys: ["grandMean", "bestCross"],
     });
 
-    function buildMatrix(p) {
+    function getDa1Method() {
+      return Math.max(1, Math.min(4, Number($("#da1Griffing")?.value || 1)));
+    }
+
+    function buildMatrix(p, method) {
+      const m = method ?? getDa1Method();
       const wrap = $("#da1GridWrap");
       wrap.innerHTML = "";
+      const cellDefault = (i, j) => {
+        const parentBase = 22 + i * 1.9;
+        const crossBoost = i === j ? 0 : 3.2 + ((i + j) % 3) * 0.8;
+        const reciprocity = i !== j ? (i > j ? 0.4 : -0.2) : 0;
+        return parentBase + j * 1.1 + crossBoost + reciprocity;
+      };
+      const def = Array.from({ length: p }, (_, i) => Array.from({ length: p }, (_, j) => cellDefault(i, j)));
+      if (m === 2) {
+        for (let i = 0; i < p; i++) for (let j = 0; j < i; j++) def[i][j] = def[j][i];
+      }
       const table = document.createElement("table");
       table.className = "data";
       const headers = ["Parent", ...Array.from({ length: p }, (_, j) => `P${j + 1}`)];
@@ -5090,12 +8113,15 @@
       for (let i = 0; i < p; i++) {
         const cells = [];
         for (let j = 0; j < p; j++) {
-          // diagonal parent + off-diagonal crosses
-          const parentBase = 22 + i * 1.9;
-          const crossBoost = i === j ? 0 : 3.2 + ((i + j) % 3) * 0.8;
-          const reciprocity = i !== j ? (i > j ? 0.4 : -0.2) : 0;
-          const val = parentBase + (j * 1.1) + crossBoost + reciprocity;
-          cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-da1="i${i}j${j}" /></td>`);
+          let disabled = false;
+          if (m === 4 && (i === j || i > j)) disabled = true;
+          if (m === 3 && i === j) disabled = true;
+          if (m === 2 && i > j) disabled = true;
+          const dis = disabled ? " disabled" : "";
+          const val = def[i][j];
+          cells.push(
+            `<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-da1="i${i}j${j}"${dis} /></td>`
+          );
         }
         rows.push(`<tr><th>P${i + 1}</th>${cells.join("")}</tr>`);
       }
@@ -5103,11 +8129,15 @@
       wrap.appendChild(table);
     }
 
-    buildMatrix(defaultN);
+    buildMatrix(defaultN, 1);
 
     $("#da1Build").addEventListener("click", () => {
       const p = Math.max(3, Math.min(10, Number($("#da1N").value || defaultN)));
-      buildMatrix(p);
+      buildMatrix(p, getDa1Method());
+    });
+    $("#da1Griffing")?.addEventListener("change", () => {
+      const p = Math.max(3, Math.min(10, Number($("#da1N").value || defaultN)));
+      buildMatrix(p, getDa1Method());
     });
 
     $("#da1BackGraph").addEventListener("click", renderDiallelGraphical);
@@ -5129,12 +8159,18 @@
     $("#da1CsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       const p = Math.max(3, Math.min(10, mat.length));
       $("#da1N").value = String(p);
-      buildMatrix(p);
+      buildMatrix(p, getDa1Method());
       for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) {
         const v = mat[i]?.[j];
         if (!Number.isFinite(v)) continue;
@@ -5147,144 +8183,191 @@
 
     $("#da1Compute").addEventListener("click", () => {
       const p = Math.max(3, Math.min(10, Number($("#da1N").value || defaultN)));
-      const M = Array.from({ length: p }, () => Array(p).fill(0));
-      for (let i = 0; i < p; i++) {
-        for (let j = 0; j < p; j++) {
-          const input = document.querySelector(`#da1GridWrap input[data-da1="i${i}j${j}"]`);
-          const v = Number(input?.value ?? NaN);
-          M[i][j] = Number.isFinite(v) ? v : 0;
-        }
+      const method = getDa1Method();
+      const modelRandom = String($("#da1ModelType")?.value || "fixed") === "random";
+      const r = Math.max(1, Number($("#da1Reps")?.value || 1));
+      const mseRaw = String($("#da1Mse")?.value || "").trim();
+      const mseIn = mseRaw === "" ? NaN : Number(mseRaw);
+
+      const M = readDiallelMatrixFromDom(p, method);
+
+      let crosses = [];
+      let ssRecip = 0;
+      let recipDf = 0;
+      if (method === 1 || method === 3) {
+        const sym = diallelSymmetricCrossesAndRecip(M, p);
+        crosses = sym.crosses;
+        ssRecip = sym.ssRecip;
+        recipDf = sym.recipDf;
+      } else {
+        for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) crosses.push(M[i][j]);
       }
 
-      // Means and effects
-      const allVals = M.flat();
-      const grandMean = mean(allVals);
-      const rowMeans = M.map((row) => mean(row));
-      const colMeans = Array.from({ length: p }, (_, j) => mean(M.map((row) => row[j])));
+      const part = griffingMethod4Partition(p, crosses);
+      const est = estimateGcaScaMethod4(p, crosses);
 
-      // DA I numerical summary:
-      // GCA_i approximated from average combining performance vs grand mean
-      const gca = rowMeans.map((rm, i) => ((rm + colMeans[i]) / 2) - grandMean);
+      const diag = Array.from({ length: p }, (_, i) => M[i][i]);
+      const meanDiag = mean(diag);
+      let ssParents = 0;
+      for (let i = 0; i < p; i++) ssParents += (diag[i] - meanDiag) ** 2;
+      const dfParents = p - 1;
+      const msParents = dfParents > 0 ? ssParents / dfParents : 0;
 
-      // SCA_ij approximated as observed cross mean minus expectation from GCA
-      // expected_ij = grandMean + gca_i + gca_j
+      const msRecip = recipDf > 0 ? ssRecip / recipDf : 0;
+      const fRecip = Number.isFinite(mseIn) && mseIn > 0 && recipDf > 0 ? msRecip / mseIn : "";
+
+      const ratioStr =
+        !Number.isFinite(part.ratioMS) || part.ratioMS > 1e12 ? "∞" : part.ratioMS.toFixed(4);
+      const gcaScaRatioInterpret =
+        part.msS <= 1e-18
+          ? "SCA MS ~ 0 — additive structure explains crosses (check df)."
+          : part.msG / part.msS > 1
+            ? "MS_GCA > MS_SCA — additive (GCA) variation predominates among crosses."
+            : "MS_SCA ≥ MS_GCA — non-additive (dominance × GCA interaction) variation is important.";
+
+      const vh = diallelVarianceHeritability(part.msG, part.msS, mseIn, p, r);
+      const degree =
+        2 * vh.sigmaGca <= 1e-18 ? 0 : Math.sqrt(Math.max(0, vh.sigmaSca / (2 * vh.sigmaGca)));
+      const geneAction =
+        degree < 0.8 ? "Predominantly additive" : degree <= 1.2 ? "Partial/complete dominance" : "Over-dominance tendency";
+
+      const fG = Number.isFinite(mseIn) && mseIn > 0 ? part.msG / mseIn : "";
+      const fS =
+        Number.isFinite(mseIn) && mseIn > 0 && part.dfS > 0 ? part.msS / mseIn : part.dfS <= 0 ? "—" : "";
+
+      const anovaRows = [
+        ["GCA (among parents, crosses)", part.ssGCA, part.dfG, part.msG, fG === "" ? "" : fG],
+        ["SCA", part.ssSCA, part.dfS, part.dfS > 0 ? part.msS : 0, fS],
+        ["Total (among unique crosses)", part.ssTot, part.dfT, "", ""],
+      ];
+      if ((method === 1 || method === 3) && recipDf > 0) {
+        anovaRows.splice(2, 0, ["Reciprocals", ssRecip, recipDf, msRecip, fRecip === "" ? "" : fRecip]);
+      }
+      if (method === 1 || method === 2) {
+        anovaRows.push(["Parents (diagonal)", ssParents, dfParents, msParents, ""]);
+      }
+
+      const tAnova = buildTable(["Source", "SS", "df", "MS", "F (vs MSE if set)"], anovaRows);
+
+      const tGca = buildTable(
+        ["Parent", "General combining ability (ĜCA)"],
+        est.gca.map((g, i) => [`P${i + 1}`, g])
+      );
+
       const scaRows = [];
       for (let i = 0; i < p; i++) {
         for (let j = 0; j < p; j++) {
           if (i === j) continue;
-          const expected = grandMean + gca[i] + gca[j];
-          const sca = M[i][j] - expected;
-          scaRows.push([`P${i + 1}xP${j + 1}`, M[i][j], expected, sca]);
+          if (method === 4 || method === 2) {
+            if (j < i) continue;
+            const s = est.scaMat[i][j];
+            if (s == null) continue;
+            scaRows.push([`P${i + 1}×P${j + 1}`, M[i][j], est.mu + est.gca[i] + est.gca[j], s]);
+          } else {
+            const s = M[i][j] - est.mu - est.gca[i] - est.gca[j];
+            scaRows.push([`P${i + 1}×P${j + 1}`, M[i][j], est.mu + est.gca[i] + est.gca[j], s]);
+          }
+        }
+      }
+      scaRows.sort((a, b) => b[3] - a[3]);
+
+      const labels = Array.from({ length: p }, (_, i) => `P${i + 1}`);
+      let scaHeat = est.scaMat;
+      if (method === 1 || method === 3) {
+        scaHeat = Array.from({ length: p }, () => Array(p).fill(null));
+        for (let i = 0; i < p; i++) {
+          for (let j = 0; j < p; j++) {
+            if (i === j) continue;
+            scaHeat[i][j] = M[i][j] - est.mu - est.gca[i] - est.gca[j];
+          }
         }
       }
 
-      // Reciprocal deviation
-      let recCount = 0;
-      let recAbsSum = 0;
-      for (let i = 0; i < p; i++) {
-        for (let j = i + 1; j < p; j++) {
-          recAbsSum += Math.abs(M[i][j] - M[j][i]);
-          recCount += 1;
-        }
+      const tSca = buildTable(
+        ["Cross", "Observed mean", "Expected (μ + ĜCA_i + ĜCA_j)", "SCA"],
+        scaRows.slice(0, Math.min(24, scaRows.length))
+      );
+
+      const hFoot = vh.mseImputed
+        ? "MSE not set: σ²_SCA and σ²_e use a fallback from MS_SCA; narrow/broad h² are indicative only."
+        : "MSE supplied: variance components use MS − MSE expectations (random model).";
+
+      const tGen = buildTable(
+        ["Parameter", "Estimate"],
+        [
+          ["Griffing method", String(method)],
+          ["Model", modelRandom ? "Random (variance components)" : "Fixed (effects / F-tests vs MSE)"],
+          ["MS_GCA / MS_SCA (crosses)", ratioStr],
+          ["Interpretation", gcaScaRatioInterpret],
+          ["σ² GCA (random)", vh.sigmaGca],
+          ["σ² SCA (random)", vh.sigmaSca],
+          ["σ² error (environment, entry-mean scale)", vh.sigmaE],
+          ["Narrow-sense heritability h²", vh.hNarrow],
+          ["Broad-sense heritability H²", vh.hBroad],
+          ["Average degree of dominance (√(σ²_SCA / 2σ²_GCA))", degree],
+          ["Gene action (from variance ratio)", geneAction],
+          ["Note", hFoot],
+        ]
+      );
+
+      const allVals = M.flat();
+      let grandMean = mean(allVals);
+      if (method === 3) {
+        const od = [];
+        for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) if (i !== j) od.push(M[i][j]);
+        grandMean = od.length ? mean(od) : grandMean;
       }
-      const reciprocalMeanDiff = recCount ? recAbsSum / recCount : 0;
-
-      // crude ANOVA-like partition on matrix cells (educational)
-      let ssTotal = 0;
-      for (const v of allVals) ssTotal += (v - grandMean) * (v - grandMean);
-      let ssRows = 0;
-      for (const rm of rowMeans) ssRows += p * (rm - grandMean) * (rm - grandMean);
-      let ssCols = 0;
-      for (const cm of colMeans) ssCols += p * (cm - grandMean) * (cm - grandMean);
-      const ssResidual = Math.max(0, ssTotal - ssRows - ssCols);
-      const dfRows = p - 1;
-      const dfCols = p - 1;
-      const dfResidual = (p - 1) * (p - 1);
-      const msRows = ssRows / Math.max(1, dfRows);
-      const msCols = ssCols / Math.max(1, dfCols);
-      const msResidual = ssResidual / Math.max(1, dfResidual);
-      const fRows = msResidual === 0 ? 0 : msRows / msResidual;
-      const fCols = msResidual === 0 ? 0 : msCols / msResidual;
-
-      // ranking by off-diagonal cross means
       const crossOnly = [];
       for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) if (i !== j) crossOnly.push({ cross: `P${i + 1}xP${j + 1}`, mean: M[i][j] });
       crossOnly.sort((a, b) => b.mean - a.mean);
       const bestCross = crossOnly[0];
 
+      let recCount = 0;
+      let recAbsSum = 0;
+      for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) recAbsSum += Math.abs(M[i][j] - M[j][i]), recCount += 1;
+      const reciprocalMeanDiff = recCount ? recAbsSum / recCount : 0;
+
       $("#da1Kpis").innerHTML = `
         <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
-          <div class="kpi"><div class="label">Grand mean</div><div class="value">${grandMean.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Cross mean (μ)</div><div class="value">${est.mu.toFixed(3)}</div></div>
           <div class="kpi"><div class="label">Best cross</div><div class="value">${qs(bestCross.cross)}</div></div>
           <div class="kpi"><div class="label">Best mean</div><div class="value">${bestCross.mean.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">MS_GCA / MS_SCA</div><div class="value">${ratioStr}</div></div>
+          <div class="kpi"><div class="label">Parents (p)</div><div class="value">${p}</div></div>
+        </div>
+        <div class="kpi-row" style="margin-top:8px;grid-template-columns:repeat(3, minmax(0,1fr))">
+          <div class="kpi"><div class="label">h² (narrow)</div><div class="value">${vh.hNarrow.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">H² (broad)</div><div class="value">${vh.hBroad.toFixed(3)}</div></div>
           <div class="kpi"><div class="label">Reciprocal avg |diff|</div><div class="value">${reciprocalMeanDiff.toFixed(3)}</div></div>
-          <div class="kpi"><div class="label">Parents</div><div class="value">${p}</div></div>
         </div>
       `;
 
-      // chart top crosses
       const top = crossOnly.slice(0, Math.min(10, crossOnly.length));
-      drawBarChart($("#da1Bar"), top.map((x) => x.cross), top.map((x) => x.mean), { title: "Top cross means (DA I)" });
+      drawBarChart($("#da1Bar"), top.map((x) => x.cross), top.map((x) => x.mean), { title: "Top cross means (Griffing DA I)" });
 
-      const tAnova = buildTable(
-        ["Source", "SS", "df", "MS", "F"],
-        [
-          ["Rows (parent-wise)", ssRows, dfRows, msRows, fRows],
-          ["Columns (parent-wise)", ssCols, dfCols, msCols, fCols],
-          ["Residual", ssResidual, dfResidual, msResidual, ""],
-          ["Total", ssTotal, p * p - 1, "", ""],
-        ]
-      );
+      const heatHtml = `<h4 class="mt-3 text-sm font-semibold text-indigo-200">SCA effects heatmap</h4>${scaHeatmapHtml(scaHeat, labels)}`;
 
-      const tGca = buildTable(
-        ["Parent", "Array mean", "Reciprocal-array mean", "General combining ability (GCA)"],
-        Array.from({ length: p }, (_, i) => [`P${i + 1}`, rowMeans[i], colMeans[i], gca[i]])
-      );
-
-      scaRows.sort((a, b) => b[3] - a[3]);
-      const tSca = buildTable(
-        ["Cross", "Observed mean", "Expected mean (GCA model)", "Specific combining ability (SCA)"],
-        scaRows.slice(0, Math.min(20, scaRows.length))
-      );
-
-      const msGCAproxy = (msRows + msCols) / 2;
-      const msSCAproxy = msResidual;
-      const modelKey = String($("#da1Model")?.value || "fixed-with-reciprocal");
-      const gp = computeDiallelGeneticParams(msGCAproxy, msSCAproxy, modelKey);
-      const tGen = buildTable(
-        ["Genetic parameter", "Estimate"],
-        [
-          ["Model assumption", gp.modelLabel],
-          ["sigma^2 GCA (proxy)", gp.sigmaGCA],
-          ["sigma^2 SCA (proxy)", gp.sigmaSCA],
-          ["sigma^2 GCA / sigma^2 SCA", gp.ratio],
-          ["sigma^2 A (additive proxy)", gp.sigmaA],
-          ["sigma^2 D (dominance proxy)", gp.sigmaD],
-          ["Average degree of dominance (proxy)", gp.degree],
-          ["Gene action class", gp.geneAction],
-        ]
-      );
-
-      $("#da1Tables").innerHTML = `${tAnova}<div style="height:10px"></div>${tGca}<div style="height:10px"></div>${tSca}<div style="height:10px"></div>${tGen}`;
+      $("#da1Tables").innerHTML = `${tAnova}<div style="height:10px"></div>${tGca}<div style="height:10px"></div>${tSca}<div style="height:10px"></div>${tGen}<div style="height:10px"></div>${heatHtml}`;
 
       const deviationHtml = deviationBanner("diallel-da1", { grandMean, bestCross: bestCross.mean }, ["grandMean", "bestCross"]);
       const interpretation =
-        `DA I numerical summary identifies parent combining patterns and superior cross combinations from the diallel matrix.\n\n` +
-        `Computed highlights:\n` +
-        `• Grand mean = ${grandMean.toFixed(3)}\n` +
+        `Griffing diallel (Method ${method}, ${modelRandom ? "random" : "fixed"} model): GCA/SCA partition for unique F1 means; reciprocal and parent sums of squares are shown when applicable.\n\n` +
+        `• Cross mean μ = ${est.mu.toFixed(4)} (half-diallel mean of unique pairs)\n` +
+        `• MS_GCA / MS_SCA = ${ratioStr} — ${gcaScaRatioInterpret}\n` +
+        `• Narrow-sense h² ≈ ${vh.hNarrow.toFixed(4)}, broad-sense H² ≈ ${vh.hBroad.toFixed(4)} (${vh.mseImputed ? "MSE imputed/approximate" : "using supplied MSE"})\n` +
         `• Best cross = ${bestCross.cross} (mean=${bestCross.mean.toFixed(3)})\n` +
-        `• Reciprocal average absolute difference = ${reciprocalMeanDiff.toFixed(3)}\n\n` +
-        `Interpretation:\n` +
-        `• Positive GCA indicates stronger average combining contribution by that parent.\n` +
-        `• Positive SCA for a cross indicates cross performance above additive expectation.\n` +
-        `• Larger reciprocal differences suggest maternal/reciprocal effects may be relevant.\n\n` +
-        `Genetic parameter proxies:\n` +
-        `• Model = ${gp.modelLabel}\n` +
-        `• sigma^2GCA=${gp.sigmaGCA.toFixed(4)}, sigma^2SCA=${gp.sigmaSCA.toFixed(4)}, ratio=${gp.ratio.toFixed(4)}\n` +
-        `• Average degree of dominance=${gp.degree.toFixed(4)} (${gp.geneAction})\n\n` +
-        `Note: These are DA I proxy estimates for practical interpretation in BKQuant; exact inferential formulas depend on strict diallel model assumptions.`;
+        `• Reciprocal mean |difference| = ${reciprocalMeanDiff.toFixed(3)}\n\n` +
+        `Positive ĜCA: parent contributes above-average progeny across crosses. Positive SCA: cross exceeds additive expectation. ` +
+        `F-tests use your MSE when provided; otherwise interpret mean squares descriptively.`;
 
-      setInterpretation("diallel-da1", interpretation, deviationHtml || "", { grandMean, bestCross: bestCross.mean, degree: gp.degree, model: gp.modelLabel });
+      setInterpretation("diallel-da1", interpretation, deviationHtml || "", {
+        grandMean,
+        bestCross: bestCross.mean,
+        degree,
+        model: modelRandom ? "random" : "fixed",
+        hNarrow: vh.hNarrow,
+        hBroad: vh.hBroad,
+      });
     });
 
     $("#da1Compute").click();
@@ -5928,7 +9011,8 @@
     const title = "North Carolina Designs (NC I, NC II, NC III)";
     showContentHeader({
       title,
-      subtitle: "Choose NC I/II/III sub-section. Each sub-section provides numeric summaries, charts, and interpretation.",
+      subtitle:
+        "Balanced NC I (nested: females within males), NC II/III (factorial M×F with reps). ANOVA, EMS-based V_A & V_D (F2 mapping), degree of dominance, narrow-sense h².",
     });
 
     const bodyHtml = `
@@ -5948,120 +9032,319 @@
       subtitle: "",
       bodyHtml,
       payloadForPrevComparison: { interpretation: "", storePrev: null },
-      prevCompareKeys: ["key"],
+      prevCompareKeys: ["h2Narrow", "VA"],
     });
 
     const tabs = $$("#ncTabs [data-nc]");
+    const defaultA = 3;
+    const defaultB = 3;
+    const defaultR = 3;
+
     function activate(tab) {
       tabs.forEach((b) => b.classList.toggle("primary2", b.dataset.nc === tab));
       tabs.forEach((b) => b.classList.toggle("action-btn", true));
+    }
+
+    function buildNc1Grid(a, b, r) {
+      const wrap = $("#nc1Grid");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Male×Female / Rep", ...Array.from({ length: r }, (_, k) => `R${k + 1}`)];
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          const cells = [];
+          for (let k = 0; k < r; k++) {
+            const val = 20 + i * 2.1 + j * 1.4 + (k - (r - 1) / 2) * 0.6;
+            cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-nc1="i${i}j${j}r${k}" /></td>`);
+          }
+          rows.push(`<tr><th>${qs(`M${i + 1}×F${j + 1}`)}</th>${cells.join("")}</tr>`);
+        }
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    function buildNc2Grid(a, b, r) {
+      const wrap = $("#nc2Grid");
+      wrap.innerHTML = "";
+      const table = document.createElement("table");
+      table.className = "data";
+      const headers = ["Cross / Rep", ...Array.from({ length: r }, (_, k) => `R${k + 1}`)];
+      table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${qs(h)}</th>`).join("")}</tr></thead>`;
+      const rows = [];
+      for (let i = 0; i < a; i++) {
+        for (let j = 0; j < b; j++) {
+          const cells = [];
+          for (let k = 0; k < r; k++) {
+            const val = 22 + i * 2.4 + j * 1.9 + (k - (r - 1) / 2) * 0.55 + (i === j ? 0.8 : 0);
+            cells.push(`<td><input type="number" step="0.01" value="${val.toFixed(2)}" data-nc2="i${i}j${j}r${k}" /></td>`);
+          }
+          rows.push(`<tr><th>${qs(`M${i + 1}×F${j + 1}`)}</th>${cells.join("")}</tr>`);
+        }
+      }
+      table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
+      wrap.appendChild(table);
+    }
+
+    function readNc1(a, b, r) {
+      const y = [];
+      for (let i = 0; i < a; i++) {
+        y[i] = [];
+        for (let j = 0; j < b; j++) {
+          y[i][j] = [];
+          for (let k = 0; k < r; k++) {
+            const input = document.querySelector(`#nc1Grid input[data-nc1="i${i}j${j}r${k}"]`);
+            const v = Number(input?.value ?? NaN);
+            y[i][j][k] = Number.isFinite(v) ? v : 0;
+          }
+        }
+      }
+      return y;
+    }
+
+    function readNc2(a, b, r) {
+      const y = [];
+      for (let i = 0; i < a; i++) {
+        y[i] = [];
+        for (let j = 0; j < b; j++) {
+          y[i][j] = [];
+          for (let k = 0; k < r; k++) {
+            const input = document.querySelector(`#nc2Grid input[data-nc2="i${i}j${j}r${k}"]`);
+            const v = Number(input?.value ?? NaN);
+            y[i][j][k] = Number.isFinite(v) ? v : 0;
+          }
+        }
+      }
+      return y;
     }
 
     function renderNCI() {
       activate("NCI");
       $("#ncBody").innerHTML = `
         <div class="kpi-row">
-          <div class="kpi"><div class="label">Design</div><div class="value">NC I</div></div>
-          <div class="kpi"><div class="label">Structure</div><div class="value">Nested males within females</div></div>
-          <div class="kpi"><div class="label">Focus</div><div class="value">Among-family variance</div></div>
+          <div class="kpi"><div class="label">Design</div><div class="value">NC I (nested)</div></div>
+          <div class="kpi"><div class="label">Partition</div><div class="value">Males, F within M, Error</div></div>
+          <div class="kpi"><div class="label">Mapping</div><div class="value">F2: V_A ≈ 4σ²_males</div></div>
         </div>
-        <div class="chart" style="height:260px;margin-top:12px"><canvas id="ncChart1" style="width:100%;height:100%"></canvas></div>
-        <div id="ncTable1" style="margin-top:12px"></div>
+        <div class="two-col" style="margin-top:12px">
+          <div class="section" style="margin:0">
+            <h4>Balanced nested layout</h4>
+            <div class="input-grid">
+              <label>Males (a) <input type="number" min="2" max="20" id="nc1A" value="${defaultA}" /></label>
+              <label>Females per male (b) <input type="number" min="2" max="20" id="nc1B" value="${defaultB}" /></label>
+              <label>Replications (r) <input type="number" min="2" max="20" id="nc1R" value="${defaultR}" /></label>
+              <button class="action-btn primary2" type="button" id="nc1Build">Build grid</button>
+            </div>
+            <p class="note" style="margin:8px 0 0">Rows = male×female families; columns = reps. Hierarchy: <strong>Males</strong> → <strong>Females within males</strong> (nested).</p>
+            <div id="nc1Grid" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px"><button class="action-btn primary2" type="button" id="nc1Compute">Compute NC I</button></div>
+          </div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="nc1Kpis"></div>
+            <div class="chart" style="height:240px;margin-top:12px"><canvas id="ncChart1" style="width:100%;height:100%"></canvas></div>
+            <div id="ncTable1" style="margin-top:12px"></div>
+          </div>
+        </div>
       `;
-
-      const labels = ["F1", "F2", "F3", "F4", "F5"];
-      const values = [18.4, 21.1, 19.8, 23.5, 22.2];
-      drawBarChart($("#ncChart1"), labels, values, { title: "NC I family means" });
-
-      const table = buildTable(
-        ["Source", "SS", "df", "MS", "Interpretation"],
-        [
-          ["Females", 112.6, 4, 28.15, "Female groups differ"],
-          ["Males within females", 138.7, 10, 13.87, "Nested male variance present"],
-          ["Error", 95.5, 20, 4.78, "Residual"],
-        ]
-      );
-      $("#ncTable1").innerHTML = table;
-
-      const interpretation =
-        `NC I evaluates nested family structure (males within females).\n` +
-        `Use it to estimate among-female and within-female components and identify promising female families.\n` +
-        `Higher between-family MS indicates stronger exploitable genetic variation at that hierarchy level.`;
-      setInterpretation("nc", interpretation, "", { key: values[3] });
+      buildNc1Grid(defaultA, defaultB, defaultR);
+      $("#nc1Build").onclick = () => {
+        const a = Math.max(2, Number($("#nc1A").value || defaultA));
+        const b = Math.max(2, Number($("#nc1B").value || defaultB));
+        const r = Math.max(2, Number($("#nc1R").value || defaultR));
+        buildNc1Grid(a, b, r);
+      };
+      $("#nc1Compute").onclick = () => {
+        const a = Math.max(2, Number($("#nc1A").value || defaultA));
+        const b = Math.max(2, Number($("#nc1B").value || defaultB));
+        const r = Math.max(2, Number($("#nc1R").value || defaultR));
+        const y = readNc1(a, b, r);
+        const an = ncDesign1NestedAnova(y, a, b, r);
+        const dd = ncDegreeDominanceAndH2(an.VA, an.VD, an.sigma2e);
+        const sigM = approxFSignificance(an.fM, an.dfM, an.dfFM);
+        const sigFM = approxFSignificance(an.fFM, an.dfFM, an.dfE);
+        const barLabels = [];
+        const barVals = [];
+        for (let i = 0; i < a; i++) {
+          let s = 0;
+          let c = 0;
+          for (let j = 0; j < b; j++) for (let k = 0; k < r; k++) s += y[i][j][k], c++;
+          barLabels.push(`M${i + 1}`);
+          barVals.push(s / c);
+        }
+        drawBarChart($("#ncChart1"), barLabels, barVals, { title: "NC I — male family means" });
+        $("#nc1Kpis").innerHTML = `
+          <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+            <div class="kpi"><div class="label">V_A (approx.)</div><div class="value">${an.VA.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">V_D (approx.)</div><div class="value">${an.VD.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">h² (narrow)</div><div class="value">${dd.h2Narrow.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">√(2V_D/V_A)</div><div class="value">${dd.degSqrt2.toFixed(4)}</div></div>
+          </div>`;
+        const anova = buildTable(
+          ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"],
+          [
+            ["Males", an.ssM, an.dfM, an.msM, an.fM, sigM.level],
+            ["Females within males", an.ssFM, an.dfFM, an.msFM, an.fFM, sigFM.level],
+            ["Error", an.ssError, an.dfE, an.msE, "", ""],
+            ["Total", an.ssTotal, a * b * r - 1, "", "", ""],
+          ]
+        );
+        const ems = buildTable(
+          ["Random effects (VC from EMS)", "Estimate"],
+          [
+            ["σ² (error / within plots)", an.sigma2e],
+            ["σ² (females within males)", an.sigmaFM],
+            ["σ² (males)", an.sigmaM],
+            ["V_A ≈ 4 σ²(males) [F2 mapping]", an.VA],
+            ["V_D ≈ 4 max(0, σ²_F|m − σ²_m) [approx.]", an.VD],
+          ]
+        );
+        const gen = buildTable(
+          ["Parameter", "Value"],
+          [
+            ["Narrow-sense heritability h² = V_A/(V_A+V_D+V_E)", dd.h2Narrow],
+            ["(V_D/V_A)^0.25 (avg. degree of dom., one convention)", dd.degPow4],
+            ["√(2 V_D/V_A) (Falconer-style ratio)", dd.degSqrt2],
+            ["V_E = MSE (within-plot env.)", an.sigma2e],
+            ["V_P ≈ V_A+V_D+V_E", dd.vp],
+          ]
+        );
+        $("#ncTable1").innerHTML = `${anova}<div style="height:10px"></div>${ems}<div style="height:10px"></div>${gen}`;
+        const interpretation =
+          `NC I (balanced nested): SS for Males and Females-within-males; F for males uses MS(F|m); nested females use MSE.\n` +
+          `V_A and V_D use F2 approximations (Comstock–Robinson style); interpret with your actual mating generation.\n` +
+          `h² (narrow) = ${dd.h2Narrow.toFixed(4)}; √(2V_D/V_A) = ${dd.degSqrt2.toFixed(4)} (partial dominance if < 1, over-dominance tendency if > 1).`;
+        setInterpretation("nc", interpretation, "", { h2Narrow: dd.h2Narrow, VA: an.VA });
+      };
+      $("#nc1Compute").click();
     }
 
-    function renderNCII() {
-      activate("NCII");
+    function renderNCII(isIII) {
+      activate(isIII ? "NCIII" : "NCII");
+      const tag = isIII ? "3" : "2";
+      const titleD = isIII ? "NC III (factorial layout)" : "NC II (factorial)";
+      const note = isIII
+        ? "NC III: same balanced M×F×r ANOVA as NC II (F2 × tester groups). Full multi-population NC III may add contrasts between gene pools."
+        : "NC II: factorial crossing; Replication SS = blocks.";
       $("#ncBody").innerHTML = `
         <div class="kpi-row">
-          <div class="kpi"><div class="label">Design</div><div class="value">NC II</div></div>
-          <div class="kpi"><div class="label">Structure</div><div class="value">Factorial male x female</div></div>
-          <div class="kpi"><div class="label">Focus</div><div class="value">GCA (male/female) and SCA</div></div>
+          <div class="kpi"><div class="label">Design</div><div class="value">${titleD}</div></div>
+          <div class="kpi"><div class="label">Partition</div><div class="value">Rep, M, F, M×F, Err</div></div>
+          <div class="kpi"><div class="label">V_D</div><div class="value">≈ 4 σ²(M×F)</div></div>
         </div>
-        <div class="chart" style="height:260px;margin-top:12px"><canvas id="ncChart2" style="width:100%;height:100%"></canvas></div>
-        <div id="ncTable2" style="margin-top:12px"></div>
+        <p class="note" style="margin:8px 0 0">${note}</p>
+        <div class="two-col" style="margin-top:12px">
+          <div class="section" style="margin:0">
+            <h4>Factorial grid</h4>
+            <div class="input-grid">
+              <label>Males (a) <input type="number" min="2" max="15" id="nc${tag}A" value="${defaultA}" /></label>
+              <label>Females (b) <input type="number" min="2" max="15" id="nc${tag}B" value="${defaultB}" /></label>
+              <label>Replications (r) <input type="number" min="2" max="20" id="nc${tag}R" value="${defaultR}" /></label>
+              <button class="action-btn primary2" type="button" id="nc${tag}Build">Build grid</button>
+            </div>
+            <div id="nc2Grid" class="matrix" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:12px"><button class="action-btn primary2" type="button" id="nc${tag}Compute">Compute ${isIII ? "NC III" : "NC II"}</button></div>
+          </div>
+          <div class="section" style="margin:0">
+            <h4>Results</h4>
+            <div id="nc${tag}Kpis"></div>
+            <div class="chart" style="height:240px;margin-top:12px"><canvas id="ncChart${tag}" style="width:100%;height:100%"></canvas></div>
+            <div id="ncTable${tag}" style="margin-top:12px"></div>
+          </div>
+        </div>
       `;
-
-      const labels = ["M1xF1", "M1xF2", "M2xF1", "M2xF2", "M3xF1", "M3xF2"];
-      const values = [25.1, 24.0, 27.4, 26.2, 23.8, 28.3];
-      drawBarChart($("#ncChart2"), labels, values, { title: "NC II cross means" });
-
-      const table = buildTable(
-        ["Source", "SS", "df", "MS", "F (vs error)"],
-        [
-          ["Males", 96.2, 2, 48.10, 6.20],
-          ["Females", 81.5, 1, 81.50, 10.50],
-          ["Male x Female", 74.8, 2, 37.40, 4.82],
-          ["Error", 108.0, 14, 7.71, ""],
-        ]
-      );
-      $("#ncTable2").innerHTML = table;
-
-      const interpretation =
-        `NC II partitions male and female main effects (GCA proxies) and male×female interaction (SCA proxy).\n` +
-        `Large male/female effects suggest additive contributions, while strong male×female interaction suggests non-additive effects.`;
-      setInterpretation("nc", interpretation, "", { key: values[5] });
+      buildNc2Grid(defaultA, defaultB, defaultR);
+      $("#nc" + tag + "Build").onclick = () => {
+        const a = Math.max(2, Number($("#nc" + tag + "A").value || defaultA));
+        const b = Math.max(2, Number($("#nc" + tag + "B").value || defaultB));
+        const r = Math.max(2, Number($("#nc" + tag + "R").value || defaultR));
+        buildNc2Grid(a, b, r);
+      };
+      $("#nc" + tag + "Compute").onclick = () => {
+        const a = Math.max(2, Number($("#nc" + tag + "A").value || defaultA));
+        const b = Math.max(2, Number($("#nc" + tag + "B").value || defaultB));
+        const r = Math.max(2, Number($("#nc" + tag + "R").value || defaultR));
+        const y = readNc2(a, b, r);
+        const an = ncDesign2FactorialAnova(y, a, b, r);
+        const dd = ncDegreeDominanceAndH2(an.VA, an.VD, an.msE);
+        const sigM = approxFSignificance(an.fM, an.dfM, an.dfE);
+        const sigF = approxFSignificance(an.fF, an.dfF, an.dfE);
+        const sigMF = approxFSignificance(an.fMF, an.dfMF, an.dfE);
+        const barLabels = [];
+        const barVals = [];
+        for (let i = 0; i < a; i++) {
+          for (let j = 0; j < b; j++) {
+            let s = 0;
+            for (let k = 0; k < r; k++) s += y[i][j][k];
+            barLabels.push(`M${i + 1}×F${j + 1}`);
+            barVals.push(s / r);
+          }
+        }
+        drawBarChart($("#ncChart" + tag), barLabels, barVals, { title: `${isIII ? "NC III" : "NC II"} — cross means` });
+        $("#nc" + tag + "Kpis").innerHTML = `
+          <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
+            <div class="kpi"><div class="label">V_A (approx.)</div><div class="value">${an.VA.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">V_D (approx.)</div><div class="value">${an.VD.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">h² (narrow)</div><div class="value">${dd.h2Narrow.toFixed(4)}</div></div>
+            <div class="kpi"><div class="label">√(2V_D/V_A)</div><div class="value">${dd.degSqrt2.toFixed(4)}</div></div>
+          </div>`;
+        const anova = buildTable(
+          ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"],
+          [
+            ["Replications", an.ssRep, an.dfRep, an.msRep, "", ""],
+            ["Males", an.ssM, an.dfM, an.msM, an.fM, sigM.level],
+            ["Females", an.ssF, an.dfF, an.msF, an.fF, sigF.level],
+            ["Male × Female", an.ssMF, an.dfMF, an.msMF, an.fMF, sigMF.level],
+            ["Error", an.ssError, an.dfE, an.msE, "", ""],
+            ["Total", an.ssTotal, a * b * r - 1, "", "", ""],
+          ]
+        );
+        const ems = buildTable(
+          ["VC from EMS (random, factorial)", "Estimate"],
+          [
+            ["σ² (error)", an.msE],
+            ["σ² (M×F) = (MS_MF−MSE)/r", an.sigmaMF],
+            ["σ² (males) = (MS_M−MS_MF)/(r·b)", an.sigmaM],
+            ["σ² (females) = (MS_F−MS_MF)/(r·a)", an.sigmaF],
+            ["V_A ≈ 2(σ²_m + σ²_f)", an.VA],
+            ["V_D ≈ 4 σ²(M×F)", an.VD],
+          ]
+        );
+        const gen = buildTable(
+          ["Parameter", "Value"],
+          [
+            ["Narrow-sense heritability h²", dd.h2Narrow],
+            ["(V_D/V_A)^0.25", dd.degPow4],
+            ["√(2 V_D/V_A)", dd.degSqrt2],
+            ["V_P ≈ V_A+V_D+V_E", dd.vp],
+          ]
+        );
+        $("#ncTable" + tag).innerHTML = `${anova}<div style="height:10px"></div>${ems}<div style="height:10px"></div>${gen}`;
+        const interpretation =
+          `${isIII ? "NC III" : "NC II"} factorial ANOVA: Replication, Male, Female, M×F (SCA), Error.\n` +
+          `V_A from male+female variance components; V_D from interaction; h² (narrow) = ${dd.h2Narrow.toFixed(4)}.\n` +
+          `√(2V_D/V_A) = ${dd.degSqrt2.toFixed(4)}.`;
+        setInterpretation("nc", interpretation, "", { h2Narrow: dd.h2Narrow, VA: an.VA });
+      };
+      $("#nc" + tag + "Compute").click();
     }
 
-    function renderNCIII() {
-      activate("NCIII");
-      $("#ncBody").innerHTML = `
-        <div class="kpi-row">
-          <div class="kpi"><div class="label">Design</div><div class="value">NC III</div></div>
-          <div class="kpi"><div class="label">Structure</div><div class="value">Backcross/testcross based contrasts</div></div>
-          <div class="kpi"><div class="label">Focus</div><div class="value">Additive vs dominance inference</div></div>
-        </div>
-        <div class="chart" style="height:260px;margin-top:12px"><canvas id="ncChart3" style="width:100%;height:100%"></canvas></div>
-        <div id="ncTable3" style="margin-top:12px"></div>
-      `;
-
-      const labels = ["L1", "L2", "L3", "L4", "L5", "L6"];
-      const values = [4.1, 3.5, 5.2, 2.9, 4.8, 3.2]; // example contrast magnitudes
-      drawBarChart($("#ncChart3"), labels, values, { title: "NC III line contrast magnitudes" });
-
-      const table = buildTable(
-        ["Component", "Estimate", "Interpretation"],
-        [
-          ["Additive component (A proxy)", 2.84, "Substantial additive influence"],
-          ["Dominance component (D proxy)", 1.71, "Moderate dominance influence"],
-          ["Degree of dominance sqrt(D/A)", 0.776, "Partial dominance tendency"],
-        ]
-      );
-      $("#ncTable3").innerHTML = table;
-
-      const interpretation =
-        `NC III is useful for separating additive and dominance tendencies using contrast structures.\n` +
-        `If dominance degree is below 1, partial dominance is indicated; above 1 suggests over-dominance tendency.\n` +
-        `Use alongside diallel and line×tester evidence for robust breeding decisions.`;
-      setInterpretation("nc", interpretation, "", { key: values[2] });
+    function renderNCIIOnly() {
+      renderNCII(false);
+    }
+    function renderNCIIIOnly() {
+      renderNCII(true);
     }
 
     tabs.forEach((btn) => {
       btn.addEventListener("click", () => {
         const t = btn.dataset.nc;
         if (t === "NCI") renderNCI();
-        if (t === "NCII") renderNCII();
-        if (t === "NCIII") renderNCIII();
+        if (t === "NCII") renderNCIIOnly();
+        if (t === "NCIII") renderNCIIIOnly();
       });
     });
 
@@ -6375,9 +9658,9 @@
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="metCompute">Compute MET summary</button>
               <button class="action-btn" type="button" id="metERCompute">Compute Eberhart-Russell</button>
-              <button class="action-btn" type="button" id="metImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="metImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="metTemplateCsv">Download template CSV</button>
-              <input type="file" id="metCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="metCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -6459,7 +9742,13 @@
     $("#metCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       // If first row likely header (non-numeric), parser strips it by numeric filter.
@@ -6675,9 +9964,9 @@
             <div id="ammiWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="ammiCompute">Compute AMMI</button>
-              <button class="action-btn" type="button" id="ammiImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="ammiImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="ammiTemplateCsv">Download template CSV</button>
-              <input type="file" id="ammiCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="ammiCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -6794,7 +10083,13 @@
     $("#ammiCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       const g = Math.max(2, Math.min(30, mat.length));
@@ -6939,9 +10234,9 @@
             <div id="dfaWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="dfaCompute">Compute Discriminant Function</button>
-              <button class="action-btn" type="button" id="dfaImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="dfaImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="dfaTemplateCsv">Download template CSV</button>
-              <input type="file" id="dfaCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="dfaCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -7043,7 +10338,13 @@
     $("#dfaCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const rows = parseCsv(txt);
       if (rows.length < 2) return;
       const data = rows.slice(1);
@@ -7219,9 +10520,9 @@
             <div id="faWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="faCompute">Compute Factor Analysis</button>
-              <button class="action-btn" type="button" id="faImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="faImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="faTemplateCsv">Download template CSV</button>
-              <input type="file" id="faCsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="faCsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -7327,7 +10628,13 @@
     $("#faCsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       const p = Math.max(2, Math.min(8, mat.length));
@@ -7506,9 +10813,9 @@
             </div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="d2Compute">Compute D2 and clustering</button>
-              <button class="action-btn" type="button" id="d2ImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="d2ImportCsv">Import CSV / Excel</button>
               <button class="action-btn" type="button" id="d2TemplateCsv">Download template CSV</button>
-              <input type="file" id="d2CsvFile" accept=".csv,text/csv" style="display:none" />
+              <input type="file" id="d2CsvFile" accept=".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
             </div>
           </div>
         </div>
@@ -8020,7 +11327,13 @@
     $("#d2CsvFile").addEventListener("change", async (e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      const txt = await f.text();
+      let txt;
+      try {
+        txt = await fileToCsvText(f);
+      } catch (err) {
+        alert(err?.message || String(err));
+        return;
+      }
       const mat = parseNumericCsvMatrix(txt);
       if (!mat.length) return;
       const n = Math.max(5, Math.min(40, mat.length));
@@ -8810,8 +12123,13 @@ G4,32.8,33.2,32.9`;
             plot_bgcolor: "#f8fafc",
             font: { color: "#1e293b", family: "Segoe UI, system-ui, sans-serif" },
             margin: { t: 48, b: 56 },
-            yaxis: { title: colNames[traitIdxBar], zeroline: true },
-            xaxis: { title: "Entry", tickangle: -25 },
+            yaxis: {
+              title: colNames[traitIdxBar],
+              zeroline: true,
+              gridcolor: "rgba(148, 163, 184, 0.5)",
+              showgrid: true,
+            },
+            xaxis: { title: "Entry", tickangle: -25, showgrid: false },
           },
           { responsive: true, displayModeBar: false }
         );
@@ -8830,9 +12148,9 @@ G4,32.8,33.2,32.9`;
             title: "Trait distributions across entries (box: quartiles + whiskers)",
             paper_bgcolor: "#ffffff",
             plot_bgcolor: "#f8fafc",
-            font: { color: "#1e293b" },
-            yaxis: { title: "Value" },
-            xaxis: { title: "Trait" },
+            font: { color: "#1e293b", size: 12 },
+            yaxis: { title: "Value", gridcolor: "rgba(148, 163, 184, 0.45)", showgrid: true },
+            xaxis: { title: "Trait", showgrid: false },
             showlegend: false,
             margin: { t: 48, b: 48 },
           },
@@ -8871,9 +12189,9 @@ G4,32.8,33.2,32.9`;
             title: `Regression / path-style trend: ${colNames[1]} vs ${colNames[0]} (R² = ${r2.toFixed(4)})`,
             paper_bgcolor: "#ffffff",
             plot_bgcolor: "#f8fafc",
-            font: { color: "#1e293b" },
-            xaxis: { title: colNames[0] },
-            yaxis: { title: colNames[1] },
+            font: { color: "#1e293b", size: 12 },
+            xaxis: { title: colNames[0], gridcolor: "rgba(148, 163, 184, 0.4)", showgrid: true },
+            yaxis: { title: colNames[1], gridcolor: "rgba(148, 163, 184, 0.4)", showgrid: true },
             margin: { t: 48 },
             annotations: [
               {
@@ -9083,7 +12401,7 @@ G5,30.8,11.9,40.1`;
           <div class="min-w-0">
             <h4 class="mb-2 text-sm font-semibold text-indigo-200">Performance table</h4>
             <div class="max-h-[min(520px,70vh)] overflow-auto rounded-lg border border-slate-700">
-              <table id="diTable" class="w-full border-collapse text-sm">
+              <table id="diTable" class="data w-full border-collapse text-sm">
                 <thead class="sticky top-0 z-10 bg-slate-900 shadow-[0_1px_0_0_rgba(51,65,85,0.9)]">
                   <tr>
                     <th data-sort="name" class="cursor-pointer border-b border-slate-600 px-3 py-2.5 text-left text-xs font-bold uppercase tracking-wide text-indigo-300">Genotype / Sample</th>
@@ -9310,13 +12628,16 @@ G5,30.8,11.9,40.1`;
       { id: "crd", title: "CRD (ANOVA)", icon: "⬚" },
       { id: "rbd", title: "RBD (ANOVA)", icon: "▤" },
       { id: "factorial", title: "Factorial RBD", icon: "⊞" },
+      { id: "fact3", title: "Factorial RBD A×B×C", icon: "⊞³" },
       { id: "lattice", title: "Lattice Square", icon: "▦" },
       { id: "augmented", title: "Augmented Design", icon: "≡" },
       { id: "splitplot", title: "Split Plot Design", icon: "▩" },
     ],
     "plant-breeding": [
       { id: "correlation", title: "Correlation", icon: "ρ" },
+      { id: "corpath", title: "Correlation & Path", icon: "ρ⇢" },
       { id: "regression", title: "Regression", icon: "→" },
+      { id: "mlr", title: "MLR (VIF + AIC)", icon: "⇉" },
       { id: "path", title: "Path Analysis", icon: "⇢" },
       { id: "discriminant", title: "Discriminant", icon: "Δ" },
       { id: "factoranalysis", title: "Factor Analysis", icon: "𝚺" },
@@ -9340,11 +12661,14 @@ G5,30.8,11.9,40.1`;
       crd: "crdCompute",
       rbd: "rbdCompute",
       factorial: "factCompute",
+      fact3: "fact3Compute",
       lattice: "latCompute",
       augmented: "augCompute",
       splitplot: "spCompute",
       correlation: "corCompute",
+      corpath: "cpaCompute",
       regression: "regCompute",
+      mlr: "mlrCompute",
       pca: "pcaCompute",
       path: "pathCompute",
       discriminant: "dfaCompute",
@@ -9388,7 +12712,7 @@ G5,30.8,11.9,40.1`;
   function showRunSelectorPanel() {
     const all = Object.values(GROUPS).flat();
     const presetCoreTrials = ["crd", "rbd", "factorial", "lattice", "augmented", "splitplot", "met", "ammi"];
-    const presetBreedingCore = ["correlation", "regression", "path", "d2", "linetester", "diallel", "nc", "triple", "genmean", "pca"];
+    const presetBreedingCore = ["correlation", "corpath", "regression", "mlr", "path", "d2", "linetester", "diallel", "nc", "triple", "genmean", "pca"];
     const checked = new Set(["rbd", "factorial", "met", "d2"]);
     const html = `
       <div class="section" style="margin-top:8px;border:1px solid rgba(255,255,255,0.14)">
@@ -9520,11 +12844,14 @@ G5,30.8,11.9,40.1`;
     if (id === "crd") return renderCRD();
     if (id === "rbd") return renderRBD();
     if (id === "factorial") return renderFactorial();
+    if (id === "fact3") return renderFactorial3();
     if (id === "lattice") return renderLatinSquare();
     if (id === "augmented") return renderAugmented();
     if (id === "splitplot") return renderSplitPlot();
     if (id === "correlation") return renderCorrelation();
+    if (id === "corpath") return renderCorrelationPath();
     if (id === "regression") return renderRegression();
+    if (id === "mlr") return renderMultipleLinearRegression();
     if (id === "pca") return renderPCA();
     if (id === "path") return renderPathCalculator();
     if (id === "discriminant") return renderDiscriminant();
@@ -9685,20 +13012,46 @@ G5,30.8,11.9,40.1`;
     const appCard = $("#appCard");
     const homeChartsCard = $("#homeChartsCard");
 
+    let v2ShellWired = false;
+    function wireV2ShellOnce() {
+      if (v2ShellWired) return;
+      v2ShellWired = true;
+      $("#v2DashBtn")?.addEventListener("click", () => showV2Dashboard());
+      $("#v2ModuleSearch")?.addEventListener("input", (e) => {
+        const q = (e.target.value || "").trim().toLowerCase();
+        $$("#sidebar .tile").forEach((t) => {
+          const title = (t.querySelector(".title")?.textContent || "").toLowerCase();
+          t.style.display = !q || title.includes(q) ? "" : "none";
+        });
+      });
+      $("#v2NewProjectBtn")?.addEventListener("click", () => {
+        saveCurrentProject(CURRENT_MODULE_ID || "crd");
+      });
+    }
+
     function setAuthed(yes) {
       if (yes) {
         localStorage.setItem(STORAGE_KEY, "1");
+        document.body.classList.add("bkq-app-mode");
         loginCard.classList.add("hidden");
         appCard.classList.remove("hidden");
         homeChartsCard?.classList.add("hidden");
+        const uname = ($("#username")?.value || "").trim();
+        const welcome = $("#v2WelcomeLine");
+        if (welcome) {
+          welcome.textContent = uname
+            ? `Welcome back, ${uname}. Select a module to begin analysis.`
+            : "Welcome — select a module to begin analysis.";
+        }
         // default show data analysis
         setActiveNav("data-analysis");
         setSidebar(GROUPS["data-analysis"]);
-        $("#contentHeader").innerHTML = `<h3>Select a module</h3><p class="muted">Use the left tiles to open full tables, plots, and interpretation.</p>`;
-        $("#contentBody").innerHTML = `<div class="note">Choose a module from the left.</div>`;
+        showV2Dashboard();
+        wireV2ShellOnce();
         ensureProfessorFab();
       } else {
         localStorage.removeItem(STORAGE_KEY);
+        document.body.classList.remove("bkq-app-mode");
         loginCard.classList.remove("hidden");
         appCard.classList.add("hidden");
         homeChartsCard?.classList.remove("hidden");
@@ -9717,10 +13070,10 @@ G5,30.8,11.9,40.1`;
     $$(".nav-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         const g = btn.dataset.group;
+        CURRENT_MODULE_ID = "";
         setActiveNav(g);
         setSidebar(GROUPS[g]);
-        $("#contentHeader").innerHTML = `<h3>Choose an analysis</h3><p class="muted">Open a module tile to view tables, plots, interpretation, and exports.</p>`;
-        $("#contentBody").innerHTML = `<div class="note">Select a module from the left.</div>`;
+        showV2Dashboard();
       });
     });
 
@@ -9729,9 +13082,44 @@ G5,30.8,11.9,40.1`;
   }
 
   // -----------------------------
+  // Hybrid offline / online (service worker + connectivity UI)
+  // -----------------------------
+  function initConnectivityUi() {
+    const sync = () => {
+      const online = navigator.onLine;
+      const label = online ? "Online" : "Offline";
+      const cls = online ? "bkq-conn-badge--online" : "bkq-conn-badge--offline";
+      $$("[data-bkq-conn]").forEach((el) => {
+        el.textContent = label;
+        el.classList.remove("bkq-conn-badge--online", "bkq-conn-badge--offline");
+        el.classList.add(cls);
+        el.title = online
+          ? "Connected — updates and CDN fetches work when needed"
+          : "Offline — BKQuant uses cached files when available (visit once online to cache CDN scripts)";
+      });
+      const hint = $("#bkqOfflineHint");
+      if (hint) hint.classList.toggle("bkq-offline-hint-hidden", online);
+    };
+    sync();
+    window.addEventListener("online", sync);
+    window.addEventListener("offline", sync);
+  }
+
+  function registerBkqServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    const swUrl = new URL("sw.js", window.location.href).href;
+    const scope = new URL("./", window.location.href).href;
+    navigator.serviceWorker.register(swUrl, { scope }).catch(() => {
+      /* file:// or blocked — hybrid UI still works when online */
+    });
+  }
+
+  // -----------------------------
   // Init
   // -----------------------------
   function init() {
+    registerBkqServiceWorker();
+    initConnectivityUi();
     bindLogin();
   }
 

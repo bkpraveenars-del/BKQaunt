@@ -1,0 +1,25 @@
+---
+description: Use R (agricolae/desplot) or Python statsmodels for validating trial statistics
+globs: BKQuant/**/*
+alwaysApply: false
+---
+
+# Statistical validation — R or Python reference libraries
+
+When implementing, debugging, or extending **ANOVA / experimental design** logic in BKQuant (CRD, RBD, factorial, split-plot, augmented RCBD, lattice, MET-style summaries, etc.):
+
+1. **Treat browser/JS results as application-layer.** For **publication-grade or audited** SS partitions, F-tests, error strata, adjusted means, and SED/CD formulas, cross-check against established packages.
+
+2. **R (recommended for field trials)**  
+   - **`agricolae`**: ANOVA layouts, augmented RCBD, response surfaces, comparison methods.  
+   - **`desplot`**: Visualize and sanity-check randomization / field layout (blocks, main plots, subplots).  
+   Suggest validating critical paths by reproducing the same design in R with identical cell means where possible.
+
+3. **Python**  
+   - **`statsmodels.formula.api`** (e.g. `ols`, mixed models where needed): formula-based models for split plots, interactions, and Type I/II/III SS where applicable.
+
+4. **Practical guidance for Cursor**  
+   - When unsure about **df for error terms**, **which MS divides which effect**, or **SED for augmented/split plot**, prefer citing or mirroring these packages’ conventions rather than inventing ad hoc rules.  
+   - Document any intentional simplification (e.g. approximate p-values without scipy/jStat) in code comments or user-facing notes.
+
+This does **not** require adding R/Python to the repo; it steers **validation and design decisions** toward stable references.
