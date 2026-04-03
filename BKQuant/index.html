@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BKQuant</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="bg-wrap" aria-hidden="true">
+      <div class="blob blob-a"></div>
+      <div class="blob blob-b"></div>
+      <div class="grid"></div>
+      <div class="dna">
+        <svg viewBox="0 0 400 140" role="img" aria-label="DNA ornament" class="dna-svg">
+          <path d="M200 15 C110 25 90 50 90 70 C90 90 110 115 200 125"
+            fill="none" stroke="rgba(80,255,210,0.9)" stroke-width="5" stroke-linecap="round"/>
+          <path d="M200 15 C290 25 310 50 310 70 C310 90 290 115 200 125"
+            fill="none" stroke="rgba(80,140,255,0.9)" stroke-width="5" stroke-linecap="round"/>
+          <path d="M120 52 L200 70 L280 52" fill="none" stroke="rgba(210,210,255,0.9)" stroke-width="3"/>
+          <path d="M120 88 L200 70 L280 88" fill="none" stroke="rgba(210,210,255,0.9)" stroke-width="3"/>
+          <path d="M150 40 L200 70 L250 40" fill="none" stroke="rgba(210,255,120,0.75)" stroke-width="2"/>
+          <path d="M150 100 L200 70 L250 100" fill="none" stroke="rgba(255,210,120,0.75)" stroke-width="2"/>
+        </svg>
+      </div>
+    </div>
+
+    <main class="shell">
+      <section class="brand">
+        <div class="logo3d" aria-hidden="true">
+          <div class="logo-face"></div>
+          <div class="logo-edge"></div>
+          <div class="logo-glow"></div>
+          <span class="logo-text">BKQuant</span>
+        </div>
+        <p class="brand-quote">
+          "Dreams and seeds share one law: measure, learn, and improve."
+        </p>
+        <p class="brand-quote sub">
+          Ramanujan meets Rosalind Franklin: precision for every trait.
+        </p>
+        <p class="help-tag">
+          Ask <b>BKQuant Professor</b> for the understanding the concepts.
+        </p>
+      </section>
+
+      <section class="card" id="loginCard">
+        <h2>Researcher Login</h2>
+        <p class="muted">
+          Enter your credentials to access BKQuant agriculture & plant-breeding analytics.
+        </p>
+
+        <form id="loginForm" autocomplete="off">
+          <label>
+            Username
+            <input type="text" id="username" placeholder="e.g., plantlab01" required />
+          </label>
+          <label>
+            Password
+            <input type="password" id="password" placeholder="••••••••" required />
+          </label>
+          <button class="primary" type="submit">Enter BKQuant</button>
+          <p class="muted small">
+            Offline demo: any username/password works.
+          </p>
+        </form>
+      </section>
+
+      <section class="card hidden" id="appCard" aria-live="polite">
+        <header class="app-header">
+          <div>
+            <h2>BKQuant Dashboard</h2>
+            <p class="muted small">
+              Choose an analysis module. Results are exportable as <b>DOC</b> and <b>XLS</b>-style files.
+            </p>
+          </div>
+          <button class="ghost" id="logoutBtn" type="button">Log out</button>
+        </header>
+
+        <nav class="analysis-nav">
+          <button class="nav-btn" data-group="data-analysis">Data Analysis</button>
+          <button class="nav-btn" data-group="plant-breeding">Plant Breeding</button>
+        </nav>
+
+        <div class="panel">
+          <aside class="sidebar" id="sidebar"></aside>
+          <div class="content">
+            <div id="contentHeader" class="content-header">
+              <h3>Select a module</h3>
+              <p class="muted">Use the left menu to open full tables, plots, and interpretation.</p>
+            </div>
+            <div id="contentBody"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
+
