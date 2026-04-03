@@ -27,7 +27,7 @@ body{
 }
 
 .shell{
-  width:min(1200px, calc(100% - 32px));
+  width:min(1080px, calc(100% - 32px));
   margin: 28px auto 40px;
   display:grid;
   gap: 18px;
@@ -418,9 +418,9 @@ table.data{
 }
 table.data th, table.data td{
   border: 1px solid rgba(255,255,255,0.12);
-  padding: 8px;
+  padding: 9px 10px;
   text-align:center;
-  font-size: 13px;
+  font-size: 14px;
 }
 table.data th{
   background: rgba(255,255,255,0.06);

@@ -518,6 +518,8 @@
     }
     let ssBlock = 0;
     for (const Bj of colTotals) ssBlock += (Bj * Bj) / t;
+    ssTreat -= CF;
+    ssBlock -= CF;
 
     const ssError = ssTotal - ssTreat - ssBlock;
 
@@ -528,10 +530,70 @@
     const msBlock = ssBlock / dfBlock;
     const msError = ssError / dfError;
     const fTreat = msError === 0 ? 0 : msTreat / msError;
+    const fBlock = msError === 0 ? 0 : msBlock / msError;
     const fSig = approxFSignificance(fTreat, dfTreat, dfError);
+    const sigBlock = approxFSignificance(fBlock, dfBlock, dfError);
 
     const means = rowTotals.map((Ti, i) => ({ treatment: `T${i + 1}`, mean: Ti / b, total: Ti }));
-    return { ssTotal, ssTreat, ssBlock, ssError, dfTreat, dfBlock, dfError, msTreat, msBlock, msError, fTreat, sig: fSig, means };
+    return {
+      ssTotal,
+      ssTreat,
+      ssBlock,
+      ssError,
+      dfTreat,
+      dfBlock,
+      dfError,
+      msTreat,
+      msBlock,
+      msError,
+      fTreat,
+      fBlock,
+      sig: fSig,
+      sigBlock,
+      means,
+    };
+  }
+
+  function parseDataMatrix(text) {
+    const lines = (text || "")
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length < 3) return null;
+    const rows = lines.map((line) => line.split(/[\t,;]+/).map((s) => Number(String(s).trim())));
+    const n = rows[0].length;
+    if (n < 2) return null;
+    for (const r of rows) {
+      if (r.length !== n) return null;
+      if (!r.every(Number.isFinite)) return null;
+    }
+    return rows;
+  }
+
+  function pearsonCorrelationMatrix(X) {
+    const n = X.length;
+    const p = X[0].length;
+    const means = Array(p).fill(0);
+    for (let j = 0; j < p; j++) for (let i = 0; i < n; i++) means[j] += X[i][j];
+    for (let j = 0; j < p; j++) means[j] /= n;
+    const cov = (a, b) => {
+      let s = 0;
+      for (let i = 0; i < n; i++) s += (X[i][a] - means[a]) * (X[i][b] - means[b]);
+      return n > 1 ? s / (n - 1) : 0;
+    };
+    const std = (j) => Math.sqrt(Math.max(0, cov(j, j)));
+    const R = Array(p)
+      .fill(0)
+      .map(() => Array(p).fill(0));
+    for (let a = 0; a < p; a++) {
+      for (let b = 0; b < p; b++) {
+        const sa = std(a);
+        const sb = std(b);
+        R[a][b] = sa === 0 || sb === 0 ? (a === b ? 1 : 0) : cov(a, b) / (sa * sb);
+      }
+    }
+    return R;
   }
 
   function pearsonCorrelation(xs, ys) {
@@ -1692,12 +1754,44 @@
       drawBarChart($("#crdBar"), labels, values, { title: "Treatment means" });
       drawResidualMiniPlot($("#crdResidualPlot"), crdResiduals, "CRD residuals");
 
-      // ANOVA table
-      const headers = ["Source", "SS", "df", "MS", "F"];
+      const overallMeanCRD = mean(out.means.map((m) => m.mean));
+      const statsCRD = computeBreedingSummaryStats({
+        meanValue: overallMeanCRD,
+        msGenotype: out.msTreat,
+        msError: out.msError,
+        replications: r,
+      });
+      const summaryCRD = buildTable(
+        ["Summary metric", "Value"],
+        [
+          ["Grand mean", overallMeanCRD],
+          ["CV (%)", statsCRD.cv],
+          ["CD (5%)", statsCRD.cd5],
+          ["SEm", statsCRD.sem],
+          ["SEd", statsCRD.sed],
+          ["H2 (broad sense, %)", statsCRD.h2],
+          ["GA", statsCRD.ga],
+          ["GA (% of mean)", statsCRD.gaPct],
+          ["PCV (%)", statsCRD.pcv],
+          ["GCV (%)", statsCRD.gcv],
+          ["ECV (%)", statsCRD.ecv],
+        ]
+      );
+      const matrixCRD = buildTable(
+        ["Component", "Variance", "Coefficient (%)"],
+        [
+          ["Genotypic (sigma^2g)", statsCRD.sigmaG, statsCRD.gcv],
+          ["Environmental (sigma^2e)", statsCRD.sigmaE, statsCRD.ecv],
+          ["Phenotypic (sigma^2p)", statsCRD.sigmaP, statsCRD.pcv],
+        ]
+      );
+
+      // ANOVA table (full: SS, df, MS, F, approximate significance)
+      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
       const anovaRows = [
-        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fStat],
-        ["Error", out.ssError, out.dfError, out.msError, ""],
-        ["Total", out.ssTotal, out.dfTreat + out.dfError, "", ""],
+        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fStat, out.sig.note],
+        ["Error", out.ssError, out.dfError, out.msError, "", ""],
+        ["Total", out.ssTotal, out.dfTreat + out.dfError, "", "", ""],
       ];
       const qItemsCRD = [
         { check: "Valid numeric inputs", pass: errors.length === 0, note: errors.length ? "Some values were invalid." : "All numeric cells valid." },
@@ -1705,7 +1799,7 @@
         { check: "Residual spread", pass: Number.isFinite(crdDiag.rmse) && crdDiag.rmse < Math.max(1e-9, Math.abs(mean(matrix.flat())) * 0.5), note: `RMSE=${crdDiag.rmse.toFixed(4)}` },
       ];
       if (strictModeShouldBlock("crd", qItemsCRD, "#crdResultTop")) return;
-      $("#crdTableWrap").innerHTML = `${qualityScoreHtml(qItemsCRD)}<div style="height:10px"></div>${buildTable(headers, anovaRows)}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 2. Assumption checklist", [
+      $("#crdTableWrap").innerHTML = `${qualityScoreHtml(qItemsCRD)}<div style="height:10px"></div><h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryCRD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixCRD}<div style="height:10px"></div>${assumptionsChecklistHtml("Table 4. Assumption checklist", [
         { assumption: "Random allocation to treatments", status: "Required", note: "Prevents systematic treatment bias." },
         { assumption: "Independent residuals", status: "Assumed", note: "Serial/spatial trends affect precision." },
         { assumption: "Variance homogeneity", status: "Assumed", note: "Large spread differences alter F reliability." },
@@ -1730,6 +1824,7 @@
         `Top means: ${best.treatment} (mean=${best.mean.toFixed(3)})` +
         (runnerUp ? `, followed by ${runnerUp.treatment} (mean=${runnerUp.mean.toFixed(3)}).` : ".") +
         `\n\n` +
+        `Genetic summary: H2=${statsCRD.h2.toFixed(2)}%, GA=${statsCRD.ga.toFixed(3)}, PCV=${statsCRD.pcv.toFixed(2)}%, GCV=${statsCRD.gcv.toFixed(2)}%, ECV=${statsCRD.ecv.toFixed(2)}%.\n\n` +
         `Note: This offline BKQuant demo uses an approximate significance rule (no full t/F distribution table). For formal reporting, use standard CRD F-tables or statistical software.`;
 
       setInterpretation(
@@ -1893,12 +1988,12 @@
       drawBarChart($("#rbdBar"), labels, values, { title: "Treatment means (over blocks)" });
       drawResidualMiniPlot($("#rbdResidualPlot"), rbdResiduals, "RBD residuals");
 
-      const headers = ["Source", "SS", "df", "MS", "F"];
+      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
       const anovaRows = [
-        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fTreat],
-        ["Blocks", out.ssBlock, out.dfBlock, out.msBlock, out.msBlock / out.msError || ""],
-        ["Error", out.ssError, out.dfError, out.msError, ""],
-        ["Total", out.ssTotal, out.dfTreat + out.dfBlock + out.dfError, "", ""],
+        ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fTreat, out.sig.note],
+        ["Blocks", out.ssBlock, out.dfBlock, out.msBlock, out.fBlock, out.sigBlock.note],
+        ["Error", out.ssError, out.dfError, out.msError, "", ""],
+        ["Total", out.ssTotal, out.dfTreat + out.dfBlock + out.dfError, "", "", ""],
       ];
       const overallMeanRBD = mean(out.means.map((m) => m.mean));
       const statsRBD = computeBreedingSummaryStats({
@@ -2449,9 +2544,15 @@
       const dfTreat = t - 1;
       const dfError = (t - 1) * (t - 2);
       const msTreat = ssTreat / dfTreat;
+      const msRow = ssRow / dfRow;
+      const msCol = ssCol / dfCol;
       const msError = ssError / dfError;
       const fTreat = msError === 0 ? 0 : msTreat / msError;
+      const fRow = msError === 0 ? 0 : msRow / msError;
+      const fCol = msError === 0 ? 0 : msCol / msError;
       const sig = approxFSignificance(fTreat, dfTreat, dfError);
+      const sigRow = approxFSignificance(fRow, dfRow, dfError);
+      const sigCol = approxFSignificance(fCol, dfCol, dfError);
 
       $("#lsResultTop").innerHTML = `
         <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr))">
@@ -2465,15 +2566,15 @@
       const means = trtTotals.map((tot, idx) => ({ trt: trtLabel(idx), mean: tot / t }));
       drawBarChart($("#lsBar"), means.map((m) => m.trt), means.map((m) => m.mean), { title: "Treatment means (Latin square)" });
 
-      const headers = ["Source", "SS", "df", "MS", "F"];
+      const headers = ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"];
       const rows = [
-        ["Rows", ssRow, dfRow, ssRow / dfRow, (ssRow / dfRow) / msError || ""],
-        ["Columns", ssCol, dfCol, ssCol / dfCol, (ssCol / dfCol) / msError || ""],
-        ["Treatments", ssTreat, dfTreat, msTreat, fTreat],
-        ["Error", ssError, dfError, msError, ""],
-        ["Total", ssTotal, N - 1, "", ""],
+        ["Rows", ssRow, dfRow, msRow, fRow, sigRow.note],
+        ["Columns", ssCol, dfCol, msCol, fCol, sigCol.note],
+        ["Treatments", ssTreat, dfTreat, msTreat, fTreat, sig.note],
+        ["Error", ssError, dfError, msError, "", ""],
+        ["Total", ssTotal, N - 1, "", "", ""],
       ];
-      $("#lsTableWrap").innerHTML = buildTable(headers, rows);
+      $("#lsTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, rows)}`;
 
       const deviationHtml = deviationBanner("lattice", { fTreat }, ["fTreat"]);
       const best = [...means].sort((a, b) => b.mean - a.mean)[0];
@@ -3014,6 +3115,11 @@
               Trait Y
               <textarea id="corY">${Array.from({ length: defaultN }, (_, i) => (8 + i * 1.15 + (i % 3 === 0 ? 1.8 : 0.6)).toFixed(2)).join(", ")}</textarea>
             </label>
+            <label>
+              Multi-trait matrix (optional)
+              <textarea id="corMatrix" rows="5" placeholder="Rows = observations, columns = traits (comma or tab). Needs ≥3 rows and ≥2 columns. Example:&#10;10.2, 8.1, 12.0&#10;11.0, 8.4, 11.5&#10;9.8, 7.9, 12.2"></textarea>
+            </label>
+            <div class="muted small" style="margin-bottom:8px">When the matrix is filled, a full Pearson correlation matrix is shown below; X/Y still drive the scatter plot.</div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="corCompute">Compute correlations</button>
             </div>
@@ -3025,6 +3131,7 @@
             <div class="chart" style="height:260px;margin-top:12px">
               <canvas id="corScatter" style="width:100%;height:100%"></canvas>
             </div>
+            <div id="corMatrixWrap" style="margin-top:12px"></div>
             <div id="corTableWrap" style="margin-top:12px"></div>
           </div>
         </div>
@@ -3085,6 +3192,17 @@
       // build scatter points
       const points = x.map((vx, i) => ({ x: vx, y: y[i] }));
       drawScatterPlot($("#corScatter"), points, { title: "Trait scatter plot", xLabel: "X", yLabel: "Y" });
+
+      const matParsed = parseDataMatrix($("#corMatrix").value);
+      let matrixHtml = "";
+      if (matParsed && matParsed[0].length >= 2) {
+        const R = pearsonCorrelationMatrix(matParsed);
+        const names = matParsed[0].map((_, i) => `T${i + 1}`);
+        const hdr = ["Trait", ...names];
+        const matRows = names.map((name, i) => [name, ...R[i]]);
+        matrixHtml = `<h4>Multi-trait Pearson correlation matrix (n = ${matParsed.length})</h4>${buildTable(hdr, matRows)}`;
+      }
+      $("#corMatrixWrap").innerHTML = matrixHtml;
 
       const headers = ["Correlation Type", "Coefficient (r)", "Direction"];
       const direction = (r) => (r > 0.01 ? "Positive" : r < -0.01 ? "Negative" : "Zero/None");
@@ -8206,1959 +8324,3 @@
 
   window.addEventListener("load", init);
 })();
-
-/* BKQuant - offline-capable web app (vanilla JS) */
-
-const $ = (sel, root = document) => root.querySelector(sel);
-
-const state = {
-  loggedIn: false,
-  currentGroup: "data-analysis",
-  activeModuleId: null,
-  previousResults: {}, // moduleId -> key metrics for deviation detection
-  currentExport: null, // {title, docHtml, excelHtml}
-};
-
-function fmt(n, d = 4) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "—";
-  return x.toFixed(d).replace(/\.?0+$/,"");
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function downloadTextFile(filename, mime, content) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 500);
-}
-
-function makeDocHtml({ title, subtitle, kpisHtml, tablesHtml, chartsHtml, interpretationHtml }) {
-  const downloadQuote = `
-    <p><b>Download quotation:</b> "BKQuant helps researchers quantify traits, learn from data, and improve plant breeding decisions."</p>
-    <p><i>Ask BKQuant Professor for the understanding the concepts.</i></p>
-  `;
-  return `<!doctype html>
-  <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>
-  <body style="font-family: Arial, sans-serif; line-height: 1.35; color:#111;">
-    <h1 style="margin:0 0 6px;">${escapeHtml(title)}</h1>
-    ${subtitle ? `<div style="margin-bottom:10px; color:#444;">${escapeHtml(subtitle)}</div>` : ""}
-    ${downloadQuote}
-    <hr/>
-    ${kpisHtml || ""}
-    ${tablesHtml || ""}
-    ${chartsHtml || ""}
-    <h2 style="margin-top:18px;">Interpretation</h2>
-    ${interpretationHtml || ""}
-  </body></html>`;
-}
-
-function makeExcelHtml({ sheetTitle, tablesHtml }) {
-  // Excel opens HTML tables (saved as .xls) in most environments.
-  return `<!doctype html>
-  <html><head><meta charset="utf-8"></head>
-  <body>
-    <h2>${escapeHtml(sheetTitle)}</h2>
-    ${tablesHtml || ""}
-  </body></html>`;
-}
-
-function setExportPayload(payload) {
-  state.currentExport = payload;
-}
-
-function exportDoc() {
-  if (!state.currentExport) return alert("Run a module first to export results.");
-  const { title, subtitle, tablesHtml, chartsHtml, interpretationHtml, kpisHtml } = state.currentExport;
-  const docHtml = makeDocHtml({ title, subtitle, kpisHtml, tablesHtml, chartsHtml, interpretationHtml });
-  downloadTextFile(`${state.currentExport.fileStem}.doc`, "application/msword", docHtml);
-}
-
-function exportXls() {
-  if (!state.currentExport) return alert("Run a module first to export results.");
-  const { title, tablesHtml } = state.currentExport;
-  const xlsHtml = makeExcelHtml({ sheetTitle: title, tablesHtml });
-  downloadTextFile(`${state.currentExport.fileStem}.xls`, "application/vnd.ms-excel", xlsHtml);
-}
-
-function setText(el, text) {
-  el.textContent = text;
-}
-
-function parseNumber(s) {
-  const x = Number(String(s).trim());
-  return Number.isFinite(x) ? x : NaN;
-}
-
-function parseCsvNumbers(text) {
-  // Supports commas/tabs/spaces and ignores empty lines.
-  const rows = String(text)
-    .trim()
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(line => line.split(/[,\t;]/).map(x => x.trim()).filter(x => x.length));
-  return rows.map(r => r.map(parseNumber));
-}
-
-function mean(arr) {
-  const xs = arr.filter(v => Number.isFinite(v));
-  if (!xs.length) return NaN;
-  return xs.reduce((a,b)=>a+b,0) / xs.length;
-}
-
-// --- Stats (Numerical Recipes style for Beta/Gamma and F/CDF/T approximations) ---
-function logGamma(xx) {
-  const x = xx;
-  const cof = [
-    76.18009172947146,    -86.50532032941677,
-    24.01409824083091,    -1.231739572450155,
-    0.1208650973866179e-2, -0.5395239384953e-5
-  ];
-  let y = x;
-  let tmp = x + 5.5;
-  tmp -= (x + 0.5) * Math.log(tmp);
-  let ser = 1.000000000190015;
-  for (let j=0; j<6; j++) {
-    y += 1;
-    ser += cof[j] / y;
-  }
-  return -tmp + Math.log(2.5066282746310005 * ser / x);
-}
-
-function betacf(a, b, x) {
-  // Continued fraction for incomplete beta (NR)
-  const MAXIT = 200;
-  const EPS = 3e-14;
-  const FPMIN = 1e-30;
-  let qab = a + b;
-  let qap = a + 1;
-  let qam = a - 1;
-  let c = 1;
-  let d = 1 - qab * x / qap;
-  if (Math.abs(d) < FPMIN) d = FPMIN;
-  d = 1 / d;
-  let h = d;
-  for (let m=1, m2=2; m<=MAXIT; m++, m2 += 2) {
-    let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
-    d = 1 + aa * d / (1);
-    if (Math.abs(d) < FPMIN) d = FPMIN;
-    c = 1 + aa / c;
-    if (Math.abs(c) < FPMIN) c = FPMIN;
-    d = 1 / d;
-    h *= d * c;
-    aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
-    d = 1 + aa * d;
-    if (Math.abs(d) < FPMIN) d = FPMIN;
-    c = 1 + aa / c;
-    if (Math.abs(c) < FPMIN) c = FPMIN;
-    d = 1 / d;
-    const del = d * c;
-    h *= del;
-    if (Math.abs(del - 1) < EPS) break;
-  }
-  return h;
-}
-
-function incBeta(a, b, x) {
-  // Regularized incomplete beta I_x(a,b)
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  const bt = Math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log(1 - x));
-  if (x < (a + 1) / (a + b + 2)) {
-    return bt * betacf(a, b, x) / a;
-  }
-  return 1 - bt * betacf(b, a, 1 - x) / b;
-}
-
-function fCdf(x, d1, d2) {
-  // CDF of F distribution
-  if (x <= 0) return 0;
-  const xx = (d1 * x) / (d1 * x + d2);
-  return incBeta(d1 / 2, d2 / 2, xx);
-}
-
-function fPValue(fStat, d1, d2) {
-  if (!Number.isFinite(fStat) || fStat < 0) return NaN;
-  const cdf = fCdf(fStat, d1, d2);
-  return 1 - cdf;
-}
-
-function tCdf(t, df) {
-  // Student's t CDF via incomplete beta.
-  // Uses symmetry for negative t.
-  if (!Number.isFinite(t)) return NaN;
-  if (df <= 0) return NaN;
-  if (t === 0) return 0.5;
-  const x = df / (df + t * t);
-  const a = df / 2;
-  const b = 0.5;
-  const ib = incBeta(a, b, x);
-  // For t>0: CDF = 1 - 0.5*I
-  const cdf = t > 0 ? 1 - 0.5 * ib : 0.5 * ib;
-  return cdf;
-}
-
-function invT(prob, df) {
-  // Inverse CDF by binary search
-  // prob in (0,1)
-  if (!(prob > 0 && prob < 1)) return NaN;
-  if (df <= 0) return NaN;
-  let lo = -100, hi = 100;
-  for (let i=0; i<80; i++) {
-    const mid = (lo + hi) / 2;
-    const c = tCdf(mid, df);
-    if (!Number.isFinite(c)) break;
-    if (c < prob) lo = mid;
-    else hi = mid;
-  }
-  return (lo + hi) / 2;
-}
-
-// --- DOM helpers ---
-function makePill({ label, value, tone }) {
-  const span = document.createElement("span");
-  span.className = "pill";
-  const dot = document.createElement("span");
-  dot.className = `dot ${tone || "ok"}`;
-  dot.setAttribute("aria-hidden", "true");
-  dot.title = tone || "ok";
-  const t = document.createElement("span");
-  t.textContent = `${label}: ${value}`;
-  span.appendChild(dot);
-  span.appendChild(t);
-  return span;
-}
-
-function renderTable(container, { columns, rows }) {
-  const table = document.createElement("table");
-  table.className = "data";
-  const thead = document.createElement("thead");
-  const trh = document.createElement("tr");
-  for (const col of columns) {
-    const th = document.createElement("th");
-    th.textContent = col;
-    trh.appendChild(th);
-  }
-  thead.appendChild(trh);
-  table.appendChild(thead);
-  const tbody = document.createElement("tbody");
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    for (const cell of row) {
-      const td = document.createElement("td");
-      td.textContent = cell;
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  container.innerHTML = "";
-  container.appendChild(table);
-
-  // Return HTML for export
-  const html = table.outerHTML;
-  return html;
-}
-
-function svgEl(tag, attrs = {}) {
-  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  return el;
-}
-
-function barChartSVG({ labels, values, title, yLabel }) {
-  const w = 720;
-  const h = 320;
-  const pad = 44;
-  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: "auto" });
-
-  const maxV = Math.max(...values.filter(v=>Number.isFinite(v)), 1);
-  const n = values.length;
-  const barW = (w - pad*2) / Math.max(n, 1);
-
-  // Background
-  svg.appendChild(svgEl("rect", { x: 0, y: 0, width: w, height: h, fill: "rgba(0,0,0,0)" }));
-
-  // Title
-  if (title) {
-    const t = svgEl("text", { x: w/2, y: 20, "text-anchor": "middle", fill: "rgba(234,241,255,0.95)", "font-size": 14, "font-weight": 800 });
-    t.textContent = title;
-    svg.appendChild(t);
-  }
-
-  // Y axis
-  svg.appendChild(svgEl("line", { x1: pad, y1: pad, x2: pad, y2: h - pad, stroke: "rgba(234,241,255,0.35)" }));
-  // X axis
-  svg.appendChild(svgEl("line", { x1: pad, y1: h - pad, x2: w - pad, y2: h - pad, stroke: "rgba(234,241,255,0.35)" }));
-
-  // Y label
-  if (yLabel) {
-    const yl = svgEl("text", { x: 12, y: h/2, fill: "rgba(234,241,255,0.85)", "font-size": 12, transform: `rotate(-90, 12, ${h/2})` });
-    yl.textContent = yLabel;
-    svg.appendChild(yl);
-  }
-
-  // Bars
-  for (let i=0; i<n; i++) {
-    const v = values[i];
-    const x = pad + i * barW + barW * 0.15;
-    const bw = barW * 0.7;
-    const bh = (h - pad*2) * (v / maxV);
-    const y = h - pad - bh;
-
-    const rect = svgEl("rect", {
-      x, y, width: bw, height: bh,
-      rx: 10,
-      fill: "rgba(82,255,202,0.40)",
-      stroke: "rgba(122,162,255,0.50)",
-      "stroke-width": 1
-    });
-    svg.appendChild(rect);
-
-    const lbl = svgEl("text", { x: x + bw/2, y: h - pad + 18, "text-anchor": "middle", fill: "rgba(234,241,255,0.85)", "font-size": 11 });
-    lbl.textContent = labels[i] || `T${i+1}`;
-    svg.appendChild(lbl);
-
-    const valLbl = svgEl("text", { x: x + bw/2, y: y - 8, "text-anchor": "middle", fill: "rgba(234,241,255,0.95)", "font-size": 12, "font-weight": 800 });
-    valLbl.textContent = Number.isFinite(v) ? fmt(v, 2) : "";
-    svg.appendChild(valLbl);
-  }
-
-  return svg;
-}
-
-function scatterChartSVG({ points, title, xLabel, yLabel }) {
-  // points: [{x,y,label}]
-  const w = 720, h = 320, pad = 44;
-  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: "auto" });
-
-  const xs = points.map(p => p.x).filter(Number.isFinite);
-  const ys = points.map(p => p.y).filter(Number.isFinite);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const spanX = (maxX - minX) || 1;
-  const spanY = (maxY - minY) || 1;
-
-  if (title) {
-    const t = svgEl("text", { x: w/2, y: 20, "text-anchor": "middle", fill: "rgba(234,241,255,0.95)", "font-size": 14, "font-weight": 800 });
-    t.textContent = title;
-    svg.appendChild(t);
-  }
-
-  svg.appendChild(svgEl("line", { x1: pad, y1: pad, x2: pad, y2: h - pad, stroke: "rgba(234,241,255,0.35)" }));
-  svg.appendChild(svgEl("line", { x1: pad, y1: h - pad, x2: w - pad, y2: h - pad, stroke: "rgba(234,241,255,0.35)" }));
-
-  if (xLabel) {
-    const xl = svgEl("text", { x: w/2, y: h - 10, fill: "rgba(234,241,255,0.85)", "font-size": 12, "text-anchor": "middle" });
-    xl.textContent = xLabel;
-    svg.appendChild(xl);
-  }
-  if (yLabel) {
-    const yl = svgEl("text", { x: 14, y: h/2, fill: "rgba(234,241,255,0.85)", "font-size": 12, transform: `rotate(-90, 14, ${h/2})` });
-    yl.textContent = yLabel;
-    svg.appendChild(yl);
-  }
-
-  for (const p of points) {
-    const x = pad + ((p.x - minX) / spanX) * (w - pad*2);
-    const y = h - pad - ((p.y - minY) / spanY) * (h - pad*2);
-
-    const c = svgEl("circle", { cx: x, cy: y, r: 6, fill: "rgba(122,162,255,0.45)", stroke: "rgba(82,255,202,0.65)", "stroke-width": 1.5 });
-    svg.appendChild(c);
-
-    if (p.label) {
-      const tt = svgEl("title");
-      tt.textContent = `${p.label}: (${fmt(p.x,3)}, ${fmt(p.y,3)})`;
-      c.appendChild(tt);
-    }
-  }
-
-  return svg;
-}
-
-function appendCharts(container, svgList) {
-  for (const svg of svgList) {
-    const wrap = document.createElement("div");
-    wrap.className = "chart";
-    wrap.appendChild(svg);
-    container.appendChild(wrap);
-  }
-}
-
-function moduleIconSvg(kind) {
-  // Returns a simple inline SVG element for visual consistency.
-  const svg = svgEl("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", xmlns: "http://www.w3.org/2000/svg" });
-  const stroke = "rgba(234,241,255,0.95)";
-  svg.setAttribute("stroke", stroke);
-  svg.setAttribute("stroke-width", "2");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-
-  if (kind === "leaf") {
-    svg.innerHTML = `
-      <path d="M4 20c7 0 14-7 16-16C11 6 4 13 4 20Z"></path>
-      <path d="M8 16c1.5-2 4-4 8-6"></path>
-    `;
-  } else if (kind === "table") {
-    svg.innerHTML = `
-      <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-      <path d="M3 10h18"></path>
-      <path d="M8 20V10"></path>
-    `;
-  } else if (kind === "dna") {
-    svg.innerHTML = `
-      <path d="M12 2c-3 2-4 4-4 6 0 2 1 4 4 6 3-2 4-4 4-6 0-2-1-4-4-6Z"></path>
-      <path d="M12 8v8"></path>
-    `;
-  } else if (kind === "plot") {
-    svg.innerHTML = `
-      <path d="M4 19V5"></path>
-      <path d="M4 19h16"></path>
-      <path d="M7 14l3-3 3 2 4-6"></path>
-    `;
-  } else if (kind === "scales") {
-    svg.innerHTML = `
-      <path d="M12 3v18"></path>
-      <path d="M5 6h14"></path>
-      <path d="M7 21h10"></path>
-    `;
-  } else {
-    svg.innerHTML = `
-      <circle cx="12" cy="12" r="9"></circle>
-      <path d="M12 7v6l4 2"></path>
-    `;
-  }
-  return svg;
-}
-
-// --- Calculators ---
-function crdAnalyze({ t, r, matrix }) {
-  // matrix[t][r]
-  const N = t * r;
-  const flat = matrix.flat();
-  const G = flat.reduce((a,b)=>a+b,0);
-  const CF = (G*G) / N;
-  const SST = flat.reduce((a,y)=>a + y*y, 0) - CF;
-
-  const trtTotals = [];
-  for (let i=0;i<t;i++){
-    trtTotals[i] = matrix[i].reduce((a,b)=>a+b,0);
-  }
-  const SS_trt = trtTotals.reduce((a,Ti)=>a + (Ti*Ti)/r, 0) - CF;
-  const df_trt = t-1;
-  const df_total = N-1;
-  const df_error = df_total - df_trt;
-  const SS_error = SST - SS_trt;
-  const MS_trt = SS_trt / df_trt;
-  const MS_error = SS_error / df_error;
-  const F = MS_trt / MS_error;
-  const p = fPValue(F, df_trt, df_error);
-
-  const means = [];
-  for (let i=0;i<t;i++) means[i] = trtTotals[i] / r;
-  const grandMean = G / N;
-  const CV = Math.sqrt(MS_error) / grandMean * 100;
-
-  // LSD at 5% (approx using exact t critical from inverse CDF).
-  const tCrit = invT(1 - 0.025, df_error);
-  const LSD05 = tCrit * Math.sqrt(2 * MS_error / r);
-
-  return {
-    N, G, CF, SST, SS_trt, SS_error,
-    df_trt, df_error, df_total,
-    MS_trt, MS_error,
-    F, p,
-    means, grandMean, CV, LSD05
-  };
-}
-
-function rbdAnalyze({ t, b, matrix }) {
-  // matrix[t][b]
-  const N = t * b;
-  const flat = matrix.flat();
-  const G = flat.reduce((a,b)=>a+b,0);
-  const CF = (G*G)/N;
-  const SST = flat.reduce((a,y)=>a + y*y,0) - CF;
-
-  const trtTotals = [];
-  for (let i=0;i<t;i++) trtTotals[i] = matrix[i].reduce((a,bv)=>a+bv,0);
-  const blockTotals = [];
-  for (let j=0;j<b;j++){
-    let s=0; for (let i=0;i<t;i++) s += matrix[i][j];
-    blockTotals[j]=s;
-  }
-
-  const SS_trt = trtTotals.reduce((a,Ti)=>a + (Ti*Ti)/b,0) - CF;
-  const SS_block = blockTotals.reduce((a,Bj)=>a + (Bj*Bj)/t,0) - CF;
-  const SS_error = SST - SS_trt - SS_block;
-
-  const df_trt = t-1;
-  const df_block = b-1;
-  const df_total = N-1;
-  const df_error = df_total - df_trt - df_block;
-
-  const MS_trt = SS_trt / df_trt;
-  const MS_block = SS_block / df_block;
-  const MS_error = SS_error / df_error;
-
-  const F = MS_trt / MS_error;
-  const p = fPValue(F, df_trt, df_error);
-
-  const means = [];
-  for (let i=0;i<t;i++) means[i] = trtTotals[i] / b;
-  const grandMean = G / N;
-  const CV = Math.sqrt(MS_error) / grandMean * 100;
-
-  const tCrit = invT(1 - 0.025, df_error);
-  const LSD05 = tCrit * Math.sqrt(2 * MS_error / b);
-
-  return {
-    N, G, CF, SST, SS_trt, SS_block, SS_error,
-    df_trt, df_block, df_error, df_total,
-    MS_trt, MS_block, MS_error,
-    F, p, means, grandMean, CV, LSD05
-  };
-}
-
-function significanceTone(p) {
-  if (!Number.isFinite(p)) return "warn";
-  if (p < 0.01) return "ok";
-  if (p < 0.05) return "warn";
-  return "danger";
-}
-
-function interpretANOVA_CRD({ t, r, analysis }) {
-  const sig = Number.isFinite(analysis.p) ? analysis.p < 0.05 : false;
-  const tone = sig ? "likely significant differences among treatments at 5%" : "no strong evidence of differences among treatments at 5%";
-  const fText = `F = ${fmt(analysis.F,3)}, p-value = ${fmt(analysis.p,4)}.`;
-  const cvText = `CV = ${fmt(analysis.CV,3)}%.`;
-  const lsdText = `LSD(0.05) for comparing treatment means = ${fmt(analysis.LSD05,4)}.`;
-  const deviation = getDeviationText("crd", { treatmentsF: analysis.F });
-  return `
-    <p><b>Decision:</b> BKQuant suggests ${tone}. ${fText}</p>
-    <p>${cvText} indicates experimental precision.</p>
-    <p>${lsdText} (use |mean_i - mean_j| > LSD to claim difference).</p>
-    ${deviation ? `<p><b>Deviation check:</b> ${deviation}</p>` : ""}
-    <p><b>Practical interpretation:</b> Use the highest treatment mean(s) as candidates for further selection, and verify stability across seasons/environments if available.</p>
-  `;
-}
-
-function interpretANOVA_RBD({ t, b, analysis }) {
-  const sig = Number.isFinite(analysis.p) ? analysis.p < 0.05 : false;
-  const tone = sig ? "likely significant differences among treatments at 5%" : "no strong evidence of differences among treatments at 5%";
-  const fText = `F (Trt effect) = ${fmt(analysis.F,3)}, p-value = ${fmt(analysis.p,4)}.`;
-  const cvText = `CV = ${fmt(analysis.CV,3)}%.`;
-  const lsdText = `LSD(0.05) for comparing treatment means = ${fmt(analysis.LSD05,4)}.`;
-  const deviation = getDeviationText("rbd", { treatmentsF: analysis.F });
-  return `
-    <p><b>Decision:</b> BKQuant suggests ${tone}. ${fText}</p>
-    <p>${cvText} indicates experimental precision.</p>
-    <p>${lsdText} (use |mean_i - mean_j| > LSD to claim difference).</p>
-    ${deviation ? `<p><b>Deviation check:</b> ${deviation}</p>` : ""}
-    <p><b>Practical interpretation:</b> If treatment differences are significant, select the best treatment mean(s) and validate performance across future blocks/environments.</p>
-  `;
-}
-
-function getDeviationText(moduleId, metrics) {
-  const key = moduleId;
-  const prev = state.previousResults[key];
-  state.previousResults[key] = { ...metrics, at: Date.now() };
-  if (!prev) return "";
-  const prevVal = prev.treatmentsF;
-  const newVal = metrics.treatmentsF;
-  if (!Number.isFinite(prevVal) || !Number.isFinite(newVal)) return "";
-  const diff = Math.abs(newVal - prevVal);
-  const rel = diff / (Math.abs(prevVal) + 1e-9);
-  if (rel < 0.02) return "";
-  return `This run deviates from your previous results (F changed from ${fmt(prevVal,3)} to ${fmt(newVal,3)}). Likely reasons: you changed the input measurements, block/treatment totals, or there is increased/decreased error variance due to different data dispersion.`;
-}
-
-function renderCrdModule(container, moduleId, moduleDef) {
-  const section = document.createElement("div");
-  section.className = "section";
-
-  section.innerHTML = `
-    <h4>${escapeHtml(moduleDef.title)}</h4>
-    <p class="muted">
-      Balanced CRD ANOVA: compute treatment effect table, p-value, CV, LSD(0.05), treatment means, and a mean plot.
-    </p>
-  `;
-
-  const inputWrap = document.createElement("div");
-  inputWrap.className = "input-grid";
-  const controls = document.createElement("div");
-  controls.className = "two-col";
-  controls.innerHTML = `
-    <label>
-      Number of treatments (t)
-      <input type="text" id="${moduleId}_t" value="5" />
-    </label>
-    <label>
-      Replications (r)
-      <input type="text" id="${moduleId}_r" value="3" />
-    </label>
-  `;
-  inputWrap.appendChild(controls);
-
-  const matrixWrap = document.createElement("div");
-  matrixWrap.className = "matrix";
-  matrixWrap.innerHTML = `<div class="muted small">Set t and r, then click “Build input matrix”.</div>`;
-  inputWrap.appendChild(matrixWrap);
-
-  const actionRow = document.createElement("div");
-  actionRow.className = "actions";
-  actionRow.innerHTML = `
-    <button class="action-btn primary2" type="button" id="${moduleId}_build">Build input matrix</button>
-    <button class="action-btn" type="button" id="${moduleId}_run">Compute CRD ANOVA</button>
-    <button class="action-btn" type="button" id="${moduleId}_demo">Use sample data</button>
-  `;
-  inputWrap.appendChild(actionRow);
-
-  const results = document.createElement("div");
-  results.id = `${moduleId}_results`;
-
-  section.appendChild(inputWrap);
-  section.appendChild(results);
-
-  container.appendChild(section);
-
-  const buildMatrix = () => {
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)));
-    const r = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_r`).value)));
-
-    if (!Number.isFinite(t) || !Number.isFinite(r)) {
-      matrixWrap.innerHTML = `<div class="note">Please enter valid integer values for t and r.</div>`;
-      return;
-    }
-
-    const table = document.createElement("table");
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    const th0 = document.createElement("th");
-    th0.textContent = "Treatment / Rep";
-    trh.appendChild(th0);
-    for (let j=0;j<r;j++){
-      const th = document.createElement("th");
-      th.textContent = `R${j+1}`;
-      trh.appendChild(th);
-    }
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    for (let i=0;i<t;i++){
-      const tr = document.createElement("tr");
-      const th = document.createElement("th");
-      th.textContent = `T${i+1}`;
-      tr.appendChild(th);
-      for (let j=0;j<r;j++){
-        const td = document.createElement("td");
-        const inp = document.createElement("input");
-        inp.type = "text";
-        inp.inputMode = "decimal";
-        inp.value = "";
-        inp.placeholder = "0";
-        inp.dataset.t = i;
-        inp.dataset.r = j;
-        td.appendChild(inp);
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-
-    matrixWrap.innerHTML = "";
-    matrixWrap.appendChild(table);
-  };
-
-  const getMatrix = () => {
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)));
-    const r = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_r`).value)));
-    const inputs = matrixWrap.querySelectorAll("tbody input");
-    if (!inputs.length) return null;
-
-    const matrix = Array.from({ length: t }, () => Array.from({ length: r }, () => NaN));
-    for (const inp of inputs) {
-      const i = Number(inp.dataset.t);
-      const j = Number(inp.dataset.r);
-      matrix[i][j] = parseNumber(inp.value);
-    }
-    // Validate all finite
-    for (let i=0;i<t;i++){
-      for (let j=0;j<r;j++){
-        if (!Number.isFinite(matrix[i][j])) return { t, r, matrix, ok: false };
-      }
-    }
-    return { t, r, matrix, ok: true };
-  };
-
-  const run = () => {
-    const { t, r, matrix, ok } = getMatrix() || {};
-    if (!t || !r || !matrix) return alert("Build the matrix first.");
-    if (!ok) return alert("Please fill every cell with numeric values.");
-
-    const analysis = crdAnalyze({ t, r, matrix });
-
-    // KPI row
-    const kpiRow = document.createElement("div");
-    kpiRow.className = "kpi-row";
-
-    const k1 = makePill({ label: "F", value: fmt(analysis.F, 3), tone: significanceTone(analysis.p) });
-    const k2 = makePill({ label: "p-value", value: fmt(analysis.p, 4), tone: significanceTone(analysis.p) });
-    const k3 = makePill({ label: "CV%", value: fmt(analysis.CV, 3), tone: analysis.CV < 15 ? "ok" : "warn" });
-    kpiRow.appendChild(k1);
-    kpiRow.appendChild(k2);
-    kpiRow.appendChild(k3);
-
-    const anovaWrap = document.createElement("div");
-    anovaWrap.className = "section";
-    anovaWrap.innerHTML = `<h4>ANOVA Table (CRD)</h4><div id="${moduleId}_anova"></div>`;
-
-    const columns = ["Source of variation", "df", "SS", "MS", "F", "p-value"];
-    const rows = [
-      ["Treatments", analysis.df_trt, fmt(analysis.SS_trt, 6), fmt(analysis.MS_trt, 6), fmt(analysis.F, 4), fmt(analysis.p, 6)],
-      ["Error", analysis.df_error, fmt(analysis.SS_error, 6), fmt(analysis.MS_error, 6), "—", "—"],
-      ["Total", analysis.df_total, fmt(analysis.SST, 6), "—", "—", "—"]
-    ];
-    const tableHtml = renderTable($("#"+moduleId+"_anova", anovaWrap) || anovaWrap.querySelector("#"+moduleId+"_anova"), { columns, rows });
-
-    // Means table
-    const meansWrap = document.createElement("div");
-    meansWrap.className = "section";
-    meansWrap.innerHTML = `<h4>Treatment Means & LSD(0.05)</h4>`;
-    const meansCols = ["Treatment", "Mean"];
-    const meansRows = analysis.means.map((m, i) => [`T${i+1}`, fmt(m, 4)]);
-    const meansTableWrap = document.createElement("div");
-    meansWrap.appendChild(meansTableWrap);
-    const meansTableHtml = renderTable(meansTableWrap, { columns: meansCols, rows: meansRows });
-
-    // Chart
-    const chartsWrap = document.createElement("div");
-    chartsWrap.className = "section";
-    chartsWrap.innerHTML = `<h4>Treatment Mean Plot</h4>`;
-    const svg = barChartSVG({
-      labels: analysis.means.map((_,i)=>`T${i+1}`),
-      values: analysis.means,
-      title: "Means by Treatment",
-      yLabel: "Mean response"
-    });
-    const chartsInner = document.createElement("div");
-    chartsInner.style.marginTop = "8px";
-    chartsWrap.appendChild(chartsInner);
-    appendCharts(chartsInner, [svg]);
-
-    // Interpretation
-    const interpretation = document.createElement("div");
-    interpretation.className = "section";
-    const interpretationHtmlStr = interpretANOVA_CRD({ t, r, analysis });
-    interpretation.innerHTML = `<h4>Interpretation</h4>${interpretationHtmlStr}`;
-
-    // Export payload
-    const chartsHtml = svg.outerHTML ? `<div>${svg.outerHTML}</div>` : "";
-    const kpisHtml = `<p><b>F</b>: ${fmt(analysis.F,3)} | <b>p</b>: ${fmt(analysis.p,6)} | <b>CV%</b>: ${fmt(analysis.CV,3)} | <b>LSD(0.05)</b>: ${fmt(analysis.LSD05,4)}</p>`;
-
-    setExportPayload({
-      title: "CRD - Complete Results",
-      subtitle: `Treatments = ${t}, Replications = ${r}`,
-      fileStem: `BKQuant_CRD_t${t}_r${r}_${new Date().toISOString().slice(0,10)}`,
-      tablesHtml: `<h3>ANOVA</h3>${tableHtml}<h3>Treatment means</h3>${meansTableHtml}`,
-      chartsHtml,
-      interpretationHtml: interpretationHtmlStr,
-      kpisHtml
-    });
-
-    results.innerHTML = "";
-    results.appendChild(kpiRow);
-    results.appendChild(anovaWrap);
-    results.appendChild(meansWrap);
-    results.appendChild(chartsWrap);
-    results.appendChild(interpretation);
-
-    // Ensure export buttons exist for this module
-    ensureExportButtons(container, moduleId);
-  };
-
-  const ensureDemoData = () => {
-    // Create a mild treatment effect dataset.
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)) || 5);
-    const r = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_r`).value)) || 3);
-    buildMatrix();
-    const base = [12, 14, 16, 18, 15, 20, 19, 22, 17, 13];
-    const noise = [ -0.8, 0.6, -0.2, 0.3, -0.5, 0.1 ];
-    const inputs = matrixWrap.querySelectorAll("tbody input");
-    let idx = 0;
-    for (const inp of inputs) {
-      const i = Number(inp.dataset.t);
-      const j = Number(inp.dataset.r);
-      const v = (base[i] ?? 14) + (j * 0.25) + (noise[(idx++)%noise.length]);
-      inp.value = v.toFixed(2);
-    }
-  };
-
-  document.getElementById(`${moduleId}_build`).addEventListener("click", buildMatrix);
-  document.getElementById(`${moduleId}_demo`).addEventListener("click", ensureDemoData);
-  document.getElementById(`${moduleId}_run`).addEventListener("click", run);
-
-  // Build initial
-  buildMatrix();
-}
-
-function ensureExportButtons(container, moduleId) {
-  // Put once per module render: we key by moduleId.
-  const existing = container.querySelector(`#${moduleId}_exportRow`);
-  if (existing) return;
-  const row = document.createElement("div");
-  row.className = "actions";
-  row.id = `${moduleId}_exportRow`;
-  row.style.margin = "12px 0 0";
-  row.innerHTML = `
-    <button class="action-btn primary2" type="button" id="${moduleId}_downloadDoc">Download DOC</button>
-    <button class="action-btn" type="button" id="${moduleId}_downloadXls">Download XLS</button>
-  `;
-  // Insert after the first section in container
-  const firstSection = container.querySelector(".section");
-  if (firstSection && firstSection.nextSibling) {
-    firstSection.parentElement.insertBefore(row, firstSection.nextSibling);
-  } else if (firstSection) {
-    container.appendChild(row);
-  } else {
-    container.appendChild(row);
-  }
-
-  $(`#${moduleId}_downloadDoc`, row).addEventListener("click", exportDoc);
-  $(`#${moduleId}_downloadXls`, row).addEventListener("click", exportXls);
-}
-
-function renderStaticModule(container, moduleDef) {
-  const section = document.createElement("div");
-  section.className = "section";
-  section.innerHTML = `
-    <h4>${escapeHtml(moduleDef.title)}</h4>
-    <p class="muted">${escapeHtml(moduleDef.subtitle || "")}</p>
-    <div class="note">
-      This module is provided as a complete educational results set (tables + plots).
-      If you want BKQuant to calculate results from your own raw data, tell me your preferred input format for this specific analysis.
-    </div>
-    <div id="${moduleDef.id}_staticGrid" style="margin-top:12px;"></div>
-  `;
-  container.appendChild(section);
-  const grid = $(`#${moduleDef.id}_staticGrid`);
-
-  // Render each "part" as a table/plot block defined by moduleDef.parts
-  for (const part of moduleDef.parts || []) {
-    const wrap = document.createElement("div");
-    wrap.className = "section";
-    wrap.style.marginBottom = "12px";
-    const h = document.createElement("h4");
-    h.textContent = part.heading || "Results";
-    wrap.appendChild(h);
-    grid.appendChild(wrap);
-
-    if (part.table) {
-      const tWrap = document.createElement("div");
-      wrap.appendChild(tWrap);
-      renderTable(tWrap, part.table);
-    }
-
-    if (part.chart) {
-      const chartsWrap = document.createElement("div");
-      wrap.appendChild(chartsWrap);
-      if (part.chart.kind === "bar") {
-        const svg = barChartSVG(part.chart.payload);
-        chartsWrap.appendChild(svg);
-        svg.classList?.add("chart-svg");
-        // Add consistent chart container
-        const outer = document.createElement("div");
-        outer.className = "chart";
-        outer.appendChild(svg);
-        chartsWrap.innerHTML = "";
-        chartsWrap.appendChild(outer);
-      } else if (part.chart.kind === "scatter") {
-        const svg = scatterChartSVG(part.chart.payload);
-        const outer = document.createElement("div");
-        outer.className = "chart";
-        outer.appendChild(svg);
-        chartsWrap.appendChild(outer);
-      } else if (part.chart.kind === "path") {
-        const d = part.chart.payload;
-        chartsWrap.appendChild(renderPathDiagramSVG(d));
-      }
-    }
-
-    if (part.text) {
-      const p = document.createElement("div");
-      p.className = "muted";
-      p.style.marginTop = "6px";
-      p.innerHTML = part.text;
-      wrap.appendChild(p);
-    }
-  }
-
-  // Interpretation
-  if (moduleDef.interpretation) {
-    const interp = document.createElement("div");
-    interp.className = "section";
-    interp.innerHTML = `<h4>Interpretation</h4>${moduleDef.interpretation}`;
-    container.appendChild(interp);
-  }
-
-  // Export payload from the static DOM
-  ensureExportButtons(container, moduleDef.id);
-  // Set export payload immediately (no computation), based on rendered content.
-  const tables = [...container.querySelectorAll(`#${moduleDef.id}_staticGrid table.data`)].map(t => t.outerHTML).join("");
-  const svgs = [...container.querySelectorAll(`#${moduleDef.id}_staticGrid svg`)].map(s => s.outerHTML).join("");
-  setExportPayload({
-    title: moduleDef.title,
-    subtitle: moduleDef.subtitle || "",
-    fileStem: `BKQuant_${moduleDef.id}_${new Date().toISOString().slice(0,10)}`,
-    tablesHtml: tables,
-    chartsHtml: svgs ? `<div>${svgs}</div>` : "",
-    interpretationHtml: moduleDef.interpretation || "",
-    kpisHtml: ""
-  });
-}
-
-function renderPathDiagramSVG({ nodes, edges }) {
-  const w = 720, h = 320;
-  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: "auto" });
-  // bg
-  svg.appendChild(svgEl("rect", { x:0, y:0, width:w, height:h, fill:"rgba(0,0,0,0)" }));
-
-  // defs arrow marker
-  const defs = svgEl("defs");
-  const marker = svgEl("marker", { id: "arrow", markerWidth: 10, markerHeight: 10, refX: 8, refY: 5, orient: "auto", markerUnits: "strokeWidth" });
-  marker.appendChild(svgEl("path", { d: "M0,0 L10,5 L0,10 z", fill: "rgba(234,241,255,0.8)" }));
-  defs.appendChild(marker);
-  svg.appendChild(defs);
-
-  // edges
-  for (const e of edges) {
-    const from = nodes.find(n => n.id === e.from);
-    const to = nodes.find(n => n.id === e.to);
-    if (!from || !to) continue;
-    const line = svgEl("line", {
-      x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-      stroke: "rgba(82,255,202,0.75)",
-      "stroke-width": 2.5,
-      "marker-end": "url(#arrow)"
-    });
-    svg.appendChild(line);
-    if (e.weight != null) {
-      const midx = (from.x + to.x)/2;
-      const midy = (from.y + to.y)/2;
-      const text = svgEl("text", { x: midx, y: midy - 6, fill: "rgba(234,241,255,0.95)", "font-size": 12, "font-weight": 800, "text-anchor":"middle" });
-      text.textContent = fmt(e.weight, 3);
-      svg.appendChild(text);
-    }
-  }
-
-  // nodes
-  for (const n of nodes) {
-    svg.appendChild(svgEl("circle", { cx: n.x, cy: n.y, r: 22, fill: "rgba(122,162,255,0.18)", stroke: "rgba(234,241,255,0.35)", "stroke-width": 2 }));
-    const label = svgEl("text", { x: n.x, y: n.y + 4, "text-anchor":"middle", fill: "rgba(234,241,255,0.95)", "font-size": 12, "font-weight": 900 });
-    label.textContent = n.label;
-    svg.appendChild(label);
-  }
-
-  return svg;
-}
-
-function renderCorrelationModule(container, moduleDef) {
-  const section = document.createElement("div");
-  section.className = "section";
-  section.innerHTML = `
-    <h4>${escapeHtml(moduleDef.title)}</h4>
-    <p class="muted">Paste paired data and BKQuant computes correlation type (Pearson), significance, and a regression line.</p>
-  `;
-
-  const input = document.createElement("div");
-  input.className = "input-grid";
-  input.innerHTML = `
-    <div class="two-col">
-      <label>
-        X variable label
-        <input type="text" id="${moduleDef.id}_xName" value="Trait X" />
-      </label>
-      <label>
-        Y variable label
-        <input type="text" id="${moduleDef.id}_yName" value="Trait Y" />
-      </label>
-    </div>
-    <label>
-      Paste data as CSV (each line: X,Y). Example: 12.3, 9.8
-      <textarea id="${moduleDef.id}_data">10, 8.4
-12, 9.7
-14, 10.1
-16, 12.0
-18, 13.6
-20, 14.1</textarea>
-    </label>
-    <div class="actions">
-      <button class="action-btn primary2" type="button" id="${moduleDef.id}_run">Compute correlation + regression</button>
-      <button class="action-btn" type="button" id="${moduleDef.id}_demo">Use sample data</button>
-    </div>
-  `;
-
-  const results = document.createElement("div");
-  results.id = `${moduleDef.id}_results`;
-
-  section.appendChild(input);
-  section.appendChild(results);
-  container.appendChild(section);
-
-  ensureExportButtons(container, moduleDef.id);
-
-  const run = () => {
-    const text = $(`#${moduleDef.id}_data`).value;
-    const rows = String(text).trim().split(/\r?\n/).filter(Boolean).map(line => line.split(/[,\t;]/).map(s=>s.trim()));
-    const pairs = rows.map(r => [parseNumber(r[0]), parseNumber(r[1])]).filter(([x,y]) => Number.isFinite(x) && Number.isFinite(y));
-    if (pairs.length < 3) return alert("Enter at least 3 valid (X,Y) pairs.");
-
-    const xs = pairs.map(p=>p[0]);
-    const ys = pairs.map(p=>p[1]);
-    const n = pairs.length;
-    const mx = mean(xs);
-    const my = mean(ys);
-    let sxx = 0, syy = 0, sxy = 0;
-    for (let i=0;i<n;i++){
-      const dx = xs[i]-mx, dy = ys[i]-my;
-      sxx += dx*dx;
-      syy += dy*dy;
-      sxy += dx*dy;
-    }
-    const r = sxy / Math.sqrt(sxx*syy);
-    // Pearson correlation test: t = r*sqrt((n-2)/(1-r^2))
-    const tStat = r * Math.sqrt((n-2)/(1 - r*r + 1e-12));
-    const p = 2 * (1 - tCdf(Math.abs(tStat), n-2));
-
-    // Linear regression y = a + b x
-    const b = sxy / (sxx + 1e-12);
-    const a = my - b*mx;
-    // R^2
-    let sst=0, sse=0;
-    for (let i=0;i<n;i++){
-      const yhat = a + b*xs[i];
-      sst += (ys[i]-my)**2;
-      sse += (ys[i]-yhat)**2;
-    }
-    const r2 = 1 - sse/(sst + 1e-12);
-
-    // Plot
-    const points = pairs.map((p, i)=>({ x:p[0], y:p[1], label: `P${i+1}` }));
-    const svgScatter = scatterChartSVG({
-      points,
-      title: "Scatter + trend (BKQuant sample)",
-      xLabel: $(`#${moduleDef.id}_xName`).value || "X",
-      yLabel: $(`#${moduleDef.id}_yName`).value || "Y"
-    });
-    // Overlay regression line
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const pad = 44; // from chart function but we don't know mapping. We'll instead append a second simple SVG overlay isn't worth it.
-    // We'll add a separate regression line plot as a bar? Keep simple: show scatter only.
-
-    // KPIs
-    const kpiRow = document.createElement("div");
-    kpiRow.className = "kpi-row";
-    kpiRow.appendChild(makePill({ label:"n", value:n, tone:"ok" }));
-    kpiRow.appendChild(makePill({ label:"Pearson r", value:fmt(r,4), tone: significanceTone(p) }));
-    kpiRow.appendChild(makePill({ label:"p-value", value:fmt(p,4), tone: significanceTone(p) }));
-
-    const corrTableWrap = document.createElement("div");
-    corrTableWrap.className = "section";
-    corrTableWrap.innerHTML = `<h4>Correlation Summary</h4><div id="${moduleDef.id}_corrTable"></div>`;
-    const corrTableHtml = renderTable($(`#${moduleDef.id}_corrTable`, corrTableWrap), {
-      columns: ["Metric", "Value"],
-      rows: [
-        ["Pearson r", fmt(r, 6)],
-        ["t-statistic", fmt(tStat, 6)],
-        ["p-value (two-sided)", fmt(p, 8)],
-        ["Linear regression: Y = a + bX", `Y = ${fmt(a,4)} + ${fmt(b,4)}X`],
-        ["R^2", fmt(r2, 6)]
-      ]
-    });
-
-    const plotWrap = document.createElement("div");
-    plotWrap.className = "section";
-    plotWrap.innerHTML = `<h4>Correlation Plot</h4>`;
-    const chartDiv = document.createElement("div");
-    chartDiv.className = "chart";
-    chartDiv.appendChild(svgScatter);
-    plotWrap.appendChild(chartDiv);
-
-    const interp = document.createElement("div");
-    interp.className = "section";
-    const dec = p < 0.05 ? "significant" : "not significant";
-    const deviation = getDeviationText(moduleDef.id, { treatmentsF: r });
-    interp.innerHTML = `<h4>Interpretation</h4>
-      <p><b>Decision:</b> Pearson correlation is ${dec} at 5% (r = ${fmt(r,4)}, p = ${fmt(p,6)}).</p>
-      <p><b>Meaning for plant breeding:</b> If traits move together, selection on one trait may indirectly improve the other (but validate causality with path analysis).</p>
-      ${deviation ? `<p><b>Deviation check:</b> ${deviation}</p>` : ""}
-    `;
-
-    // Export payload
-    setExportPayload({
-      title: "Correlation & Regression - Complete Results",
-      subtitle: `n = ${n}`,
-      fileStem: `BKQuant_Corr_${new Date().toISOString().slice(0,10)}`,
-      tablesHtml: corrTableHtml,
-      chartsHtml: svgScatter.outerHTML ? `<div>${svgScatter.outerHTML}</div>` : "",
-      interpretationHtml: interp.innerHTML.replace(/<h4>Interpretation<\/h4>/,""),
-      kpisHtml: ""
-    });
-
-    results.innerHTML = "";
-    results.appendChild(kpiRow);
-    results.appendChild(corrTableWrap);
-    results.appendChild(plotWrap);
-    results.appendChild(interp);
-  };
-
-  $(`#${moduleDef.id}_run`).addEventListener("click", run);
-  $(`#${moduleDef.id}_demo`).addEventListener("click", () => {
-    $(`#${moduleDef.id}_xName`).value = "Trait X";
-    $(`#${moduleDef.id}_yName`).value = "Trait Y";
-    $(`#${moduleDef.id}_data`).value = `10, 8.4
-12, 9.7
-14, 10.1
-16, 12.0
-18, 13.6
-20, 14.1`;
-  });
-}
-
-function renderRegressionModule(container, moduleDef) {
-  // For now reuse correlation module for linear regression equation, plus additional text.
-  const wrap = document.createElement("div");
-  wrap.className = "section";
-  wrap.innerHTML = `<h4>${escapeHtml(moduleDef.title)}</h4><p class="muted">BKQuant currently computes linear regression from paired data (types overview included below).</p>`;
-
-  const types = document.createElement("div");
-  types.className = "section";
-  types.innerHTML = `<h4>Regression types (overview)</h4>
-    <p class="muted">Linear regression: Y = a + bX (most common for trait relationships).<br/>
-    Quadratic regression: Y = a + bX + cX^2 (for curvilinear trends).<br/>
-    Multiple regression: Y = a + b1X1 + b2X2 + ... (for predicting yield from multiple components).</p>`;
-  wrap.appendChild(types);
-  container.appendChild(wrap);
-
-  // Include correlation/regression calculator UI as a practical tool.
-  renderCorrelationModule(container, { id: moduleDef.id + "_corrUI" , title: "Regression (Linear) Calculator" });
-}
-
-function renderDialleleModule(container, moduleDef) {
-  const section = document.createElement("div");
-  section.className = "section";
-  section.innerHTML = `
-    <h4>${escapeHtml(moduleDef.title)}</h4>
-    <p class="muted">Diallele (graphical + numerical approach) with methods I–IV and NC I–III.</p>
-    <div class="actions" style="margin:8px 0 12px;">
-      <button class="action-btn primary2" type="button" data-tab="DAI">DA I</button>
-      <button class="action-btn" type="button" data-tab="DAII">DA II</button>
-      <button class="action-btn" type="button" data-tab="DAIII">DA III</button>
-      <button class="action-btn" type="button" data-tab="DAIV">DA IV</button>
-      <button class="action-btn" type="button" data-tab="NCI">NC I</button>
-      <button class="action-btn" type="button" data-tab="NCII">NC II</button>
-      <button class="action-btn" type="button" data-tab="NCIII">NC III</button>
-    </div>
-    <div class="section" id="${moduleDef.id}_tabHost" style="margin-bottom:0;"></div>
-  `;
-  container.appendChild(section);
-
-  ensureExportButtons(container, moduleDef.id);
-
-  const tabHost = $(`#${moduleDef.id}_tabHost`);
-  const tabs = {
-    DAI: dialleleTab("Method I (DA I) - Graphical overview", "A simple additive separation with clear parent means and dominance components."),
-    DAII: dialleleTab("Method II (DA II) - Numerical approach", "Compute variance components and test for genetic effects using standard diallele relations."),
-    DAIII: dialleleTab("Method III (DA III) - Hybrid interpretation", "Use numerical relations to interpret cross performance and distinguish additive vs non-additive."),
-    DAIV: dialleleTab("Method IV (DA IV) - Complete diallele decomposition", "Expanded decomposition considering all relevant diallelic contrasts."),
-    NCI: dialleleTab("NC I - Partial numerical contrasts", "Contrasts within common crosses and comparison to parents."),
-    NCII: dialleleTab("NC II - Additional numerical contrasts", "Extended NC contrasts and effect estimation."),
-    NCIII: dialleleTab("NC III - Final combined contrasts", "Final combined estimates and decision summary.")
-  };
-
-  function dialleleTab(title, text) {
-    const div = document.createElement("div");
-    div.innerHTML = `
-      <h4>${escapeHtml(title)}</h4>
-      <div class="muted">${escapeHtml(text)}</div>
-      <div style="height:10px"></div>
-      <div id="${moduleDef.id}_tablePlace"></div>
-      <div style="margin-top:12px" id="${moduleDef.id}_plotPlace"></div>
-    `;
-    const table = [
-      ["Diallele contrast", "Example estimate", "Interpretation"],
-      ["Additive (A)", "0.84", "Additive contribution present"],
-      ["Dominance (D)", "1.20", "Non-additive effects likely"],
-      ["Epistasis", "0.18", "Small interaction component (example)"],
-      ["Error / residual", "0.09", "Measurement and sampling variation"]
-    ];
-    renderTable($(`#${moduleDef.id}_tablePlace`, div), {
-      columns: table[0],
-      rows: table.slice(1).map(r => r)
-    });
-
-    const svg = barChartSVG({
-      labels: ["A", "D", "Epi", "Err"],
-      values: [0.84, 1.20, 0.18, 0.09],
-      title: "Diallele Effects (Sample)",
-      yLabel: "Effect magnitude"
-    });
-    const plotWrap = document.createElement("div");
-    plotWrap.className = "chart";
-    plotWrap.appendChild(svg);
-    $(`#${moduleDef.id}_plotPlace`, div).appendChild(plotWrap);
-    return div;
-  }
-
-  const setTab = (tabKey) => {
-    tabHost.innerHTML = "";
-    tabHost.appendChild(tabs[tabKey]);
-    setExportPayload({
-      title: "Diallele Design - Complete Results",
-      subtitle: tabKey,
-      fileStem: `BKQuant_Diallele_${tabKey}_${new Date().toISOString().slice(0,10)}`,
-      tablesHtml: tabHost.querySelector("table") ? tabHost.querySelector("table").outerHTML : "",
-      chartsHtml: tabHost.querySelector("svg") ? `<div>${tabHost.querySelector("svg").outerHTML}</div>` : "",
-      interpretationHtml: tabHost.innerHTML,
-      kpisHtml: ""
-    });
-  };
-
-  tabHost.innerHTML = "";
-  setTab("DAI");
-
-  section.querySelectorAll("button[data-tab]").forEach(btn => {
-    btn.addEventListener("click", () => setTab(btn.dataset.tab));
-  });
-}
-
-// --- Module definitions ---
-const MODULES = {
-  "data-analysis": [
-    { id:"crd", group:"data-analysis", title:"CRD (Complete Randomized Design)", icon:"table", type:"crd" },
-    { id:"rbd", group:"data-analysis", title:"RBD (Randomized Complete Block Design)", icon:"table", type:"rbd" },
-    { id:"rbd-factorial", group:"data-analysis", title:"RBD with Factorial Design", icon:"plot", type:"static",
-      subtitle:"Two-way factorial in randomized blocks (educational results set).",
-      parts:[
-        {
-          heading:"ANOVA (Sample) - Balanced 2x2 in RBD",
-          table:{
-            columns:["Source","df","SS","MS","F","p-value"],
-            rows:[
-              ["Blocks",1,"34.20","34.20","2.13","0.18"],
-              ["A (Factor A)",1,"215.50","215.50","14.02","0.01"],
-              ["B (Factor B)",1,"96.80","96.80","6.30","0.05"],
-              ["A x B",1,"40.60","40.60","2.64","0.12"],
-              ["Error",4,"61.50","15.38","—","—"],
-              ["Total",8,"448.60","—","—","—"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{
-            labels:["A","B","A×B"],
-            values:[215.5,96.8,40.6],
-            title:"Effect Strength (Sample SS)",
-            yLabel:"Sum of Squares"
-          }},
-          text:"If the A and B main effects are significant but the interaction is not, main-factor selection is recommended with careful check of consistency."
-        }
-      ],
-      interpretation:"<p>In the sample result, Factor <b>A</b> is strongly significant and <b>B</b> is marginally significant, while <b>A×B</b> interaction is not significant. This pattern means trait response differs across levels of A and B mostly independently; selection can focus on the best combinations but prioritize A-driven improvements.</p><p>If your new dataset deviates (different p-values/SS), the deviation usually comes from changed variability/error variance, altered balancing of treatments/blocks, or unequal magnitudes of interaction.</p>"
-    },
-    { id:"lattice", group:"data-analysis", title:"Lattice Square Design", icon:"leaf", type:"static",
-      subtitle:"Example layout + analysis results for lattice experiments.",
-      parts:[
-        { heading:"Lattice Efficiency (Sample)", table:{
-            columns:["Measure","Value"],
-            rows:[
-              ["Number of treatments","16"],
-              ["Blocks (incomplete blocks)","4"],
-              ["Error SS (Lattice)","48.20"],
-              ["Error SS (CRD comparable)","69.50"],
-              ["Relative efficiency","1.44"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{
-            labels:["CRD-Err","Lattice-Err"],
-            values:[69.5,48.2],
-            title:"Error Reduction (Sample)",
-            yLabel:"Error SS"
-          }},
-          text:"A lattice design often increases precision by reducing error by partitioning treatments into smaller incomplete blocks."
-        }
-      ],
-      interpretation:"<p>The sample shows reduced error SS under lattice compared with a CRD comparable arrangement, giving higher relative efficiency. If your lattice results deviate, it typically means incomplete-block formation did not align well with the field heterogeneity pattern, or your plots have higher-than-expected spatial variability.</p>"
-    },
-    { id:"augmented", group:"data-analysis", title:"Augmented Design", icon:"plot", type:"static",
-      subtitle:"Augmented design results (useful with many genotypes and limited replications).",
-      parts:[
-        { heading:"Augmented ANOVA (Sample) - Adjusted Means", table:{
-            columns:["Genotype / Check","Adjusted mean","Std. error"],
-            rows:[
-              ["G1","10.42","0.33"],
-              ["G2","9.88","0.35"],
-              ["G3","11.05","0.31"],
-              ["Check 1","9.60","0.29"],
-              ["Check 2","10.02","0.28"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{
-            labels:["G1","G2","G3","C1","C2"],
-            values:[10.42,9.88,11.05,9.6,10.02],
-            title:"Adjusted Means (Sample)",
-            yLabel:"Adjusted response"
-          }}
-        }
-      ],
-      interpretation:"<p>Adjusted means account for check performance, enabling fair comparison among unreplicated test entries. If your results deviate from prior runs, likely causes include different check behavior (environmental drift), inconsistent management, or higher residual variance affecting adjustment.</p>"
-    },
-    { id:"splitplot", group:"data-analysis", title:"Split Plot Design", icon:"scales", type:"static",
-      subtitle:"Split-plot analysis results (main plots vs subplots).",
-      parts:[
-        { heading:"Split-plot ANOVA (Sample)", table:{
-            columns:["Source","df","SS","MS","F","p-value"],
-            rows:[
-              ["Main plot (Factor A)","1","120.0","120.0","8.40","0.03"],
-              ["Error (A)","2","28.6","14.3","—","—"],
-              ["Sub plot (Factor B)","2","210.4","105.2","12.10","0.01"],
-              ["A x B","2","34.1","17.05","1.88","0.22"],
-              ["Error (B)","4","36.4","9.10","—","—"],
-              ["Total","11","429.5","—","—","—"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{
-            labels:["A","B","A×B"],
-            values:[120.0,210.4,34.1],
-            title:"Effect Strength (Sample SS)",
-            yLabel:"Sum of Squares"
-          }}
-        }
-      ],
-      interpretation:"<p>If main plot A is significant and subplot B is more significant, prioritize B for selection after ensuring main-plot conditions are suitable. If your p-values differ, deviation generally comes from changed main-plot heterogeneity or differing subplot residual variance.</p>"
-    }
-  ],
-  "plant-breeding": [
-    { id:"correlation", group:"plant-breeding", title:"Correlation Analysis (types)", icon:"plot", type:"correlation",
-      subtitle:"Pearson correlation + significance; also uses regression line context." },
-    { id:"regression", group:"plant-breeding", title:"Regression Analysis (types)", icon:"plot", type:"regression",
-      subtitle:"BKQuant includes linear regression from paired data and overview of other types." },
-    { id:"path", group:"plant-breeding", title:"Path Analysis (with diagram)", icon:"dna", type:"static",
-      subtitle:"Direct and indirect effects with a path diagram (sample).",
-      parts:[
-        { heading:"Path Diagram (Sample)", chart:{ kind:"path", payload:{
-            nodes:[
-              {id:"X1", label:"X1", x:120, y:80},
-              {id:"X2", label:"X2", x:300, y:55},
-              {id:"X3", label:"X3", x:300, y:155},
-              {id:"Y", label:"Y", x:520, y:105}
-            ],
-            edges:[
-              {from:"X1", to:"Y", weight:0.62},
-              {from:"X2", to:"Y", weight:-0.24},
-              {from:"X3", to:"Y", weight:0.38},
-              {from:"X1", to:"X2", weight:0.30},
-              {from:"X1", to:"X3", weight:-0.12},
-              {from:"X2", to:"X3", weight:0.18}
-            ]
-          }}},
-        { heading:"Direct/Indirect Effects (Sample) - Interpretation table", table:{
-            columns:["Predictor","Direct effect","Largest indirect contribution","Decision"],
-            rows:[
-              ["X1","0.62","via X2","Positive driver"],
-              ["X2","-0.24","via X1","Negative influence"],
-              ["X3","0.38","via Y components","Moderate positive driver"]
-            ]
-          },
-          text:"Path analysis helps separate causal relationships from mere association (correlation)."
-        }
-      ],
-      interpretation:"<p>In the sample, X1 shows the largest positive direct effect on Y, while X2 shows a negative direct effect. If your results deviate, typical causes include changes in trait measurement, altered genetic background, or different covariance structure among components.</p>"
-    },
-    { id:"discriminant", group:"plant-breeding", title:"Discriminant Function Analysis", icon:"scales", type:"static",
-      subtitle:"Group separation (sample results).",
-      parts:[
-        { heading:"Classification Results (Sample)", table:{
-            columns:["Group","Predicted correct","Accuracy (%)"],
-            rows:[
-              ["Group A","28","82.4"],
-              ["Group B","24","73.1"],
-              ["Group C","19","66.2"],
-              ["Overall","71","73.6"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{ labels:["A","B","C"], values:[82.4,73.1,66.2], title:"Group Accuracy (Sample)", yLabel:"Accuracy %" }}
-        }
-      ],
-      interpretation:"<p>Higher accuracy indicates strong discriminatory variables. If you see deviation, it often comes from different group balance, sampling size changes, or new trait distributions shifting discriminant boundaries.</p>"
-    },
-    { id:"factor", group:"plant-breeding", title:"Factor Analysis", icon:"dna", type:"static",
-      subtitle:"Dimension reduction (sample).",
-      parts:[
-        { heading:"Rotated Factor Loadings (Sample)", table:{
-            columns:["Trait","Factor 1","Factor 2","Uniqueness"],
-            rows:[
-              ["Plant height","0.81","0.12","0.30"],
-              ["Days to flowering","0.10","0.84","0.28"],
-              ["Yield","0.74","0.22","0.36"],
-              ["Seed size","0.18","0.76","0.25"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{ labels:["F1","F2"], values:[1.96,1.43], title:"Eigenvalues (Sample)", yLabel:"Eigenvalue" }}
-        }
-      ],
-      interpretation:"<p>Factor analysis reveals correlated trait clusters. Deviations from prior runs usually reflect different variance structure or measurement noise; check missing data handling and scaling.</p>"
-    },
-    { id:"d2", group:"plant-breeding", title:"D2 (Mahalanobis) Analysis", icon:"table", type:"static",
-      subtitle:"Genetic divergence clustering and distances (sample).",
-      parts:[
-        { heading:"D2 Distances & Clusters (Sample)", table:{
-            columns:["Cluster pair","D2 distance","Interpretation"],
-            rows:[
-              ["Cluster I vs II","18.6","Moderate divergence"],
-              ["Cluster I vs III","34.2","High divergence"],
-              ["Cluster II vs III","22.1","Moderate-high divergence"]
-            ]
-          },
-          text:"Select diverse parents from high D2 distance clusters to maximize heterosis potential."
-        }
-      ],
-      interpretation:"<p>If your D2 distances differ from earlier analyses, deviations arise from changed trait distributions, scaling differences, or different covariance estimates due to sample composition.</p>"
-    },
-    { id:"metroglyph", group:"plant-breeding", title:"Metroglyph Analysis", icon:"plot", type:"static",
-      subtitle:"Associative visualization of genotypes across traits (sample).",
-      parts:[
-        { heading:"Metroglyph Interpretation (Sample)", table:{
-            columns:["Trait","Direction","Genotype pattern"],
-            rows:[
-              ["Yield","Positive","Genotypes with high yield cluster"],
-              ["Early maturity","Negative","Trade-off visible in mid-group"],
-              ["Seed quality","Positive","Consistent improvement in selected lines"]
-            ]
-          },
-          chart:{ kind:"scatter", payload:{
-            points:[{x:1,y:3,label:"G1"},{x:2,y:2,label:"G2"},{x:3,y:4,label:"G3"},{x:4,y:1,label:"G4"}],
-            title:"Metroglyph-like scatter (Sample)",
-            xLabel:"Trait index 1",
-            yLabel:"Trait index 2"
-          }}
-        }
-      ],
-      interpretation:"<p>Metroglyphs reveal multi-trait patterns. Deviations usually come from scaling, missing values, or different trait weighting.</p>"
-    },
-    { id:"line-tester", group:"plant-breeding", title:"Line x Tester Design", icon:"table", type:"static",
-      subtitle:"Combining ability (sample).",
-      parts:[
-        { heading:"GCA/SCA Summary (Sample)", table:{
-            columns:["Source","gca or sca","Estimate","Interpretation"],
-            rows:[
-              ["Line1","GCA","0.42","Good general combiner"],
-              ["Line2","GCA","-0.18","Below-average combiner"],
-              ["Tester1","GCA","0.25","Improves crosses"],
-              ["Cross L1×T1","SCA","0.60","Strong specific combining"],
-              ["Cross L2×T2","SCA","-0.35","Weak/negative specific combining"]
-            ]
-          },
-          text:"Use significant SCA for specific hybrid performance; use high GCA to pick parents."
-        }
-      ],
-      interpretation:"<p>If your results deviate, check whether the line/tester sets and replications match the intended mating design and whether the trait is measured consistently across environments.</p>"
-    },
-    { id:"diallele", group:"plant-breeding", title:"Diallele Design (DA & NC)", icon:"dna", type:"diallele",
-      subtitle:"Graphical and numerical approach: DA I–IV and NC I–III." ,
-      parts:[],
-      interpretation:"<p>Diallele methods separate additive and non-additive genetic components across generations. Deviations from prior results are commonly due to different parental genetic backgrounds, cross scheme changes, or environment effects.</p>"
-    },
-    { id:"triple-test-cross", group:"plant-breeding", title:"Triple Test Cross", icon:"leaf", type:"static",
-      subtitle:"Sample interpretation and expected genetic relationships." ,
-      parts:[
-        { heading:"Expected Outcomes (Sample)", table:{
-            columns:["Cross set","Measured response","Genetic interpretation"],
-            rows:[
-              ["(A×B)×C","Higher","Dominance/epistasis likely"],
-              ["(A×C)×B","Lower","Additive effect dominates"],
-              ["(B×C)×A","Medium","Mixed additive-nonadditive"]
-            ]
-          }
-        }
-      ],
-      interpretation:"<p>Triple test cross helps resolve gene action. Deviations typically arise from genotype-specific environment interactions and measurement noise.</p>"
-    },
-    { id:"generation-mean", group:"plant-breeding", title:"Generation Mean Analysis", icon:"plot", type:"static",
-      subtitle:"Mean generation model (sample).",
-      parts:[
-        { heading:"Generation Model (Sample)", table:{
-            columns:["Parameter","Estimate","Action"],
-            rows:[
-              ["m (mean)","9.81","Overall mean"],
-              ["d (additive)","1.10","Additive effect"],
-              ["h (dominance)","2.20","Dominance effect"],
-              ["i (epistasis)","-0.35","Interaction (example)"],
-              ["Error / residual","0.12","Variance component"]
-            ]
-          }
-        }
-      ],
-      interpretation:"<p>If dominance h is large and significant in your run, consider breeding strategies that exploit heterosis; if additive d dominates, focus on selection for additive improvement. Deviations likely reflect changed trait variance or incorrect generation mapping.</p>"
-    },
-    { id:"met", group:"plant-breeding", title:"MET (Multi-Environment Trials)", icon:"table", type:"static",
-      subtitle:"Stability and performance overview (sample).",
-      parts:[
-        { heading:"Stability Summary (Sample)", table:{
-            columns:["Environment","Mean","Rank","Stability note"],
-            rows:[
-              ["E1","12.4","2","Moderate stability"],
-              ["E2","13.1","1","High stability"],
-              ["E3","11.3","3","Lower stability"],
-              ["E4","12.0","4","Variable response"]
-            ]
-          }
-        }
-      ],
-      interpretation:"<p>MET results identify both mean performance and stability. Deviations occur with changing environments, inconsistent management, and different planting dates or disease pressure.</p>"
-    },
-    { id:"ammi", group:"plant-breeding", title:"AMMI & Biplot Analysis", icon:"plot", type:"static",
-      subtitle:"AMMI model output and biplot (sample).",
-      parts:[
-        { heading:"AMMI Summary (Sample)", table:{
-            columns:["Component","SS","% variation explained","Interpretation"],
-            rows:[
-              ["IPCA1","18.2","45.0%","Major interaction axis"],
-              ["IPCA2","12.3","30.4%","Secondary interaction axis"],
-              ["Residual","9.1","22.5%","Unexplained variation"]
-            ]
-          },
-          chart:{ kind:"scatter", payload:{
-            points:[
-              {x:-1.2,y:0.6,label:"G1"},
-              {x:0.2,y:1.3,label:"G2"},
-              {x:1.1,y:-0.4,label:"G3"},
-              {x:-0.6,y:-1.1,label:"G4"}
-            ],
-            title:"AMMI Biplot-like scatter (Sample)",
-            xLabel:"IPCA1",
-            yLabel:"IPCA2"
-          }}
-        }
-      ],
-      interpretation:"<p>AMMI biplots help identify stable genotypes (near zero IPCA scores) and specific adaptation (extreme IPCA scores). Deviations are caused by environment selection, changes in interaction structure, or different genotype sets.</p>"
-    },
-    { id:"pca", group:"plant-breeding", title:"PCA (Principal Component Analysis)", icon:"dna", type:"static",
-      subtitle:"Sample PCA tables and explained variance plot. (For live PCA computation, provide your preferred data format.)",
-      parts:[
-        { heading:"PCA Explained Variance (Sample)", table:{
-            columns:["PC","Eigenvalue","Explained %","Cumulative %"],
-            rows:[
-              ["PC1","2.62","52.4","52.4"],
-              ["PC2","1.21","24.2","76.6"],
-              ["PC3","0.72","14.4","91.0"],
-              ["PC4","0.45","9.0","100.0"]
-            ]
-          },
-          chart:{ kind:"bar", payload:{
-            labels:["PC1","PC2","PC3","PC4"],
-            values:[52.4,24.2,14.4,9.0],
-            title:"Explained Variance (Sample)",
-            yLabel:"% variance"
-          }}
-        },
-        { heading:"Biplot-like Coordinates (Sample)", chart:{ kind:"scatter", payload:{
-            points:[
-              {x:-1.0,y:0.5,label:"G1"},
-              {x:0.8,y:0.2,label:"G2"},
-              {x:1.1,y:1.2,label:"G3"},
-              {x:-0.4,y:-1.1,label:"G4"}
-            ],
-            title:"PCA biplot-like scatter (Sample)",
-            xLabel:"PC1",
-            yLabel:"PC2"
-          }}}
-      ],
-      interpretation:"<p>PCA summarizes multi-trait variation into principal components. If your results deviate, the most common reasons are scaling differences, different sample composition, or missing traits.</p>"
-    }
-  ]
-};
-
-// --- Rendering main app ---
-function renderSidebar(groupId) {
-  const sidebar = $("#sidebar");
-  const mods = MODULES[groupId] || [];
-
-  sidebar.innerHTML = `
-    <div class="sidebar-head">
-      <div>
-        <div style="font-weight:950;">Modules</div>
-        <div class="muted small">Choose an analysis</div>
-      </div>
-      <div class="muted small">BKQuant</div>
-    </div>
-    <div class="module-tiles" role="list"></div>
-  `;
-
-  const tiles = sidebar.querySelector(".module-tiles");
-  mods.forEach(mod => {
-    const tile = document.createElement("button");
-    tile.className = "tile";
-    tile.type = "button";
-    tile.dataset.moduleId = mod.id;
-    tile.setAttribute("role", "listitem");
-    const icon = moduleIconSvg(mod.icon);
-    tile.appendChild(Object.assign(document.createElement("span"), { className: "ico" })).appendChild(icon);
-    // The above line is wrong; fix with proper append:
-  });
-}
-
-function renderSidebarCorrect(groupId) {
-  const sidebar = $("#sidebar");
-  const mods = MODULES[groupId] || [];
-
-  sidebar.innerHTML = `
-    <div class="sidebar-head">
-      <div>
-        <div style="font-weight:950;">Modules</div>
-        <div class="muted small">Choose an analysis</div>
-      </div>
-      <div class="muted small">BKQuant</div>
-    </div>
-    <div class="module-tiles" role="list"></div>
-  `;
-
-  const tiles = sidebar.querySelector(".module-tiles");
-  mods.forEach(mod => {
-    const tile = document.createElement("button");
-    tile.className = "tile";
-    tile.type = "button";
-    tile.dataset.moduleId = mod.id;
-    tile.setAttribute("role", "listitem");
-
-    const ico = document.createElement("span");
-    ico.className = "ico";
-    ico.appendChild(moduleIconSvg(mod.icon));
-
-    const title = document.createElement("span");
-    title.className = "title";
-    title.textContent = mod.title;
-
-    tile.appendChild(ico);
-    tile.appendChild(title);
-
-    tile.addEventListener("click", () => loadModule(mod.id));
-    tiles.appendChild(tile);
-  });
-}
-
-function loadModule(moduleId) {
-  const mod = Object.values(MODULES).flat().find(m => m.id === moduleId);
-  if (!mod) return;
-  state.activeModuleId = moduleId;
-  setActiveTile(moduleId);
-
-  const header = $("#contentHeader");
-  const body = $("#contentBody");
-  header.innerHTML = `
-    <h3>${escapeHtml(mod.title)}</h3>
-    <p class="muted">BKQuant agriculture + quantitative analytics module.</p>
-  `;
-  body.innerHTML = "";
-
-  // Render based on module type
-  if (mod.type === "crd") {
-    renderCrdModule(body, mod.id, mod);
-  } else if (mod.type === "rbd") {
-    renderRbdModule(body, mod.id, mod);
-  } else if (mod.id === "rbd-factorial") {
-    renderStaticModule(body, mod);
-  } else if (mod.type === "correlation") {
-    renderCorrelationModule(body, mod);
-  } else if (mod.type === "regression") {
-    renderRegressionModule(body, mod);
-  } else if (mod.type === "diallele") {
-    renderDialleleModule(body, mod);
-  } else {
-    renderStaticModule(body, mod);
-  }
-}
-
-function renderRbdModule(container, moduleId, moduleDef) {
-  const section = document.createElement("div");
-  section.className = "section";
-
-  section.innerHTML = `
-    <h4>${escapeHtml(moduleDef.title)}</h4>
-    <p class="muted">
-      Balanced RBD (RCBD) ANOVA: compute treatment effect table (with blocks), p-value, CV, LSD(0.05),
-      treatment means, and a mean plot.
-    </p>
-  `;
-
-  const inputWrap = document.createElement("div");
-  inputWrap.className = "input-grid";
-  const controls = document.createElement("div");
-  controls.className = "two-col";
-  controls.innerHTML = `
-    <label>
-      Number of treatments (t)
-      <input type="text" id="${moduleId}_t" value="5" />
-    </label>
-    <label>
-      Number of blocks / replications (b)
-      <input type="text" id="${moduleId}_b" value="3" />
-    </label>
-  `;
-  inputWrap.appendChild(controls);
-
-  const matrixWrap = document.createElement("div");
-  matrixWrap.className = "matrix";
-  matrixWrap.innerHTML = `<div class="muted small">Set t and b, then click “Build input matrix”.</div>`;
-  inputWrap.appendChild(matrixWrap);
-
-  const actionRow = document.createElement("div");
-  actionRow.className = "actions";
-  actionRow.innerHTML = `
-    <button class="action-btn primary2" type="button" id="${moduleId}_build">Build input matrix</button>
-    <button class="action-btn" type="button" id="${moduleId}_run">Compute RBD ANOVA</button>
-    <button class="action-btn" type="button" id="${moduleId}_demo">Use sample data</button>
-  `;
-  inputWrap.appendChild(actionRow);
-
-  const results = document.createElement("div");
-  results.id = `${moduleId}_results`;
-
-  section.appendChild(inputWrap);
-  section.appendChild(results);
-
-  container.appendChild(section);
-
-  const buildMatrix = () => {
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)));
-    const b = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_b`).value)));
-    if (!Number.isFinite(t) || !Number.isFinite(b)) {
-      matrixWrap.innerHTML = `<div class="note">Please enter valid integer values for t and b.</div>`;
-      return;
-    }
-
-    const table = document.createElement("table");
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    const th0 = document.createElement("th");
-    th0.textContent = "Treatment / Block";
-    trh.appendChild(th0);
-    for (let j=0;j<b;j++){
-      const th = document.createElement("th");
-      th.textContent = `B${j+1}`;
-      trh.appendChild(th);
-    }
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    for (let i=0;i<t;i++){
-      const tr = document.createElement("tr");
-      const th = document.createElement("th");
-      th.textContent = `T${i+1}`;
-      tr.appendChild(th);
-      for (let j=0;j<b;j++){
-        const td = document.createElement("td");
-        const inp = document.createElement("input");
-        inp.type = "text";
-        inp.inputMode = "decimal";
-        inp.value = "";
-        inp.placeholder = "0";
-        inp.dataset.t = i;
-        inp.dataset.b = j;
-        td.appendChild(inp);
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-
-    matrixWrap.innerHTML = "";
-    matrixWrap.appendChild(table);
-  };
-
-  const getMatrix = () => {
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)));
-    const b = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_b`).value)));
-    const inputs = matrixWrap.querySelectorAll("tbody input");
-    if (!inputs.length) return null;
-
-    const matrix = Array.from({ length: t }, () => Array.from({ length: b }, () => NaN));
-    for (const inp of inputs) {
-      const i = Number(inp.dataset.t);
-      const j = Number(inp.dataset.b);
-      matrix[i][j] = parseNumber(inp.value);
-    }
-    for (let i=0;i<t;i++){
-      for (let j=0;j<b;j++){
-        if (!Number.isFinite(matrix[i][j])) return { t, b, matrix, ok: false };
-      }
-    }
-    return { t, b, matrix, ok: true };
-  };
-
-  const run = () => {
-    const packed = getMatrix();
-    if (!packed) return alert("Build the matrix first.");
-    const { t, b, matrix, ok } = packed;
-    if (!ok) return alert("Please fill every cell with numeric values.");
-
-    const analysis = rbdAnalyze({ t, b, matrix });
-
-    const kpiRow = document.createElement("div");
-    kpiRow.className = "kpi-row";
-    kpiRow.appendChild(makePill({ label: "F", value: fmt(analysis.F, 3), tone: significanceTone(analysis.p) }));
-    kpiRow.appendChild(makePill({ label: "p-value", value: fmt(analysis.p, 4), tone: significanceTone(analysis.p) }));
-    kpiRow.appendChild(makePill({ label: "CV%", value: fmt(analysis.CV, 3), tone: analysis.CV < 15 ? "ok" : "warn" }));
-
-    const anovaWrap = document.createElement("div");
-    anovaWrap.className = "section";
-    anovaWrap.innerHTML = `<h4>ANOVA Table (RBD / RCBD)</h4><div id="${moduleId}_anova"></div>`;
-
-    const columns = ["Source of variation", "df", "SS", "MS", "F", "p-value"];
-    const rows = [
-      ["Treatments", analysis.df_trt, fmt(analysis.SS_trt, 6), fmt(analysis.MS_trt, 6), fmt(analysis.F, 4), fmt(analysis.p, 6)],
-      ["Blocks", analysis.df_block, fmt(analysis.SS_block, 6), fmt(analysis.MS_block, 6), "—", "—"],
-      ["Error", analysis.df_error, fmt(analysis.SS_error, 6), fmt(analysis.MS_error, 6), "—", "—"],
-      ["Total", analysis.df_total, fmt(analysis.SST, 6), "—", "—", "—"]
-    ];
-    const tableHtml = renderTable($(`#${moduleId}_anova`, anovaWrap), { columns, rows });
-
-    const meansWrap = document.createElement("div");
-    meansWrap.className = "section";
-    meansWrap.innerHTML = `<h4>Treatment Means & LSD(0.05)</h4>`;
-    const meansTableWrap = document.createElement("div");
-    meansWrap.appendChild(meansTableWrap);
-    const meansTableHtml = renderTable(meansTableWrap, {
-      columns: ["Treatment", "Mean"],
-      rows: analysis.means.map((m, i) => [`T${i+1}`, fmt(m, 4)])
-    });
-
-    const chartsWrap = document.createElement("div");
-    chartsWrap.className = "section";
-    chartsWrap.innerHTML = `<h4>Treatment Mean Plot</h4>`;
-    const svg = barChartSVG({
-      labels: analysis.means.map((_,i)=>`T${i+1}`),
-      values: analysis.means,
-      title: "Means by Treatment",
-      yLabel: "Mean response"
-    });
-    const chartsInner = document.createElement("div");
-    chartsInner.style.marginTop = "8px";
-    chartsWrap.appendChild(chartsInner);
-    appendCharts(chartsInner, [svg]);
-
-    const interpretationStr = interpretANOVA_RBD({ t, b, analysis });
-    const interpretation = document.createElement("div");
-    interpretation.className = "section";
-    interpretation.innerHTML = `<h4>Interpretation</h4>${interpretationStr}`;
-
-    setExportPayload({
-      title: "RBD - Complete Results",
-      subtitle: `Treatments = ${t}, Blocks = ${b}`,
-      fileStem: `BKQuant_RBD_t${t}_b${b}_${new Date().toISOString().slice(0,10)}`,
-      tablesHtml: `<h3>ANOVA</h3>${tableHtml}<h3>Treatment means</h3>${meansTableHtml}`,
-      chartsHtml: svg.outerHTML ? `<div>${svg.outerHTML}</div>` : "",
-      interpretationHtml: interpretationStr,
-      kpisHtml: `<p><b>F</b>: ${fmt(analysis.F,3)} | <b>p</b>: ${fmt(analysis.p,6)} | <b>CV%</b>: ${fmt(analysis.CV,3)} | <b>LSD(0.05)</b>: ${fmt(analysis.LSD05,4)}</p>`
-    });
-
-    results.innerHTML = "";
-    results.appendChild(kpiRow);
-    results.appendChild(anovaWrap);
-    results.appendChild(meansWrap);
-    results.appendChild(chartsWrap);
-    results.appendChild(interpretation);
-
-    ensureExportButtons(container, moduleId);
-  };
-
-  const useDemoData = () => {
-    const t = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_t`).value)) || 5);
-    const b = Math.max(2, Math.floor(parseNumber(document.getElementById(`${moduleId}_b`).value)) || 3);
-    buildMatrix();
-    const base = [11.2, 12.8, 14.1, 15.4, 13.3, 16.2, 15.8, 17.0];
-    const blockEff = [ -0.4, 0.2, 0.5, -0.1, 0.3 ];
-    const noise = [ -0.7, 0.5, -0.2, 0.35, -0.45, 0.15 ];
-    const inputs = matrixWrap.querySelectorAll("tbody input");
-    let idx=0;
-    for (const inp of inputs) {
-      const i = Number(inp.dataset.t);
-      const j = Number(inp.dataset.b);
-      const v = (base[i] ?? 13.0) + (blockEff[j] ?? 0) + (j*0.15) + (noise[(idx++)%noise.length]);
-      inp.value = v.toFixed(2);
-    }
-  };
-
-  document.getElementById(`${moduleId}_build`).addEventListener("click", buildMatrix);
-  document.getElementById(`${moduleId}_demo`).addEventListener("click", useDemoData);
-  document.getElementById(`${moduleId}_run`).addEventListener("click", run);
-
-  buildMatrix();
-}
-
-function init() {
-  // Login
-  $("#loginForm").addEventListener("submit", (e) => {
-    e.preventDefault();
-    state.loggedIn = true;
-    $("#loginCard").classList.add("hidden");
-    $("#appCard").classList.remove("hidden");
-    // default module
-    renderSidebarCorrect("data-analysis");
-    state.currentGroup = "data-analysis";
-    loadModule("crd");
-    // reset export payload
-    state.currentExport = null;
-  });
-
-  // Nav group
-  document.querySelectorAll(".nav-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      const groupId = btn.dataset.group;
-      state.currentGroup = groupId;
-      renderSidebarCorrect(groupId);
-      // Load first module
-      const first = MODULES[groupId] && MODULES[groupId][0];
-      if (first) loadModule(first.id);
-    });
-  });
-
-  $("#logoutBtn").addEventListener("click", () => {
-    state.loggedIn = false;
-    state.previousResults = {};
-    state.activeModuleId = null;
-    state.currentExport = null;
-    $("#appCard").classList.add("hidden");
-    $("#loginCard").classList.remove("hidden");
-  });
-
-  // Set default active nav button visually
-  document.querySelectorAll(".nav-btn").forEach(btn => btn.classList.remove("active"));
-  const defaultBtn = document.querySelector('.nav-btn[data-group="data-analysis"]');
-  if (defaultBtn) defaultBtn.classList.add("active");
-}
-
-// Kickoff
-init();
-
-// --- Fix: active tile helper ---
-function setActiveTile(moduleId) {
-  const tiles = document.querySelectorAll("#sidebar .tile");
-  tiles.forEach(t => t.classList.toggle("active", t.dataset.moduleId === moduleId));
-}
-
