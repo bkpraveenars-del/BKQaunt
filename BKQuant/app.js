@@ -392,6 +392,28 @@
     return { level: "ns", ok: false, note: "Not significant (approx.)" };
   }
 
+  function computeBreedingSummaryStats({ meanValue, msGenotype, msError, replications, selectionIntensity = 2.06 }) {
+    const r = Math.max(1, replications || 1);
+    const meanSafe = Math.max(1e-12, Math.abs(meanValue));
+    const sigmaG = Math.max(0, (msGenotype - msError) / r);
+    const sigmaE = Math.max(0, msError);
+    const sigmaP = Math.max(0, sigmaG + sigmaE);
+
+    const pcv = (Math.sqrt(sigmaP) / meanSafe) * 100;
+    const gcv = (Math.sqrt(sigmaG) / meanSafe) * 100;
+    const ecv = (Math.sqrt(sigmaE) / meanSafe) * 100;
+    const h2 = sigmaP <= 1e-12 ? 0 : (sigmaG / sigmaP) * 100;
+    const ga = selectionIntensity * Math.sqrt(sigmaP) * (h2 / 100);
+    const gaPct = (ga / meanSafe) * 100;
+
+    const sem = Math.sqrt(msError / r);
+    const sed = Math.sqrt((2 * msError) / r);
+    const cd5 = 2.06 * sed; // approx 5% level
+    const cv = (Math.sqrt(msError) / meanSafe) * 100;
+
+    return { cv, cd5, sem, sed, h2, ga, gaPct, pcv, gcv, ecv, sigmaG, sigmaE, sigmaP };
+  }
+
   function parseGridNumbers(text) {
     // Accept comma/space/newline separated numbers.
     const t = (text || "").trim();
@@ -1436,7 +1458,38 @@
         ["Error", out.ssError, out.dfError, out.msError, ""],
         ["Total", out.ssTotal, out.dfTreat + out.dfBlock + out.dfError, "", ""],
       ];
-      $("#rbdTableWrap").innerHTML = buildTable(headers, anovaRows);
+      const overallMeanRBD = mean(out.means.map((m) => m.mean));
+      const statsRBD = computeBreedingSummaryStats({
+        meanValue: overallMeanRBD,
+        msGenotype: out.msTreat,
+        msError: out.msError,
+        replications: b,
+      });
+      const summaryRBD = buildTable(
+        ["Summary metric", "Value"],
+        [
+          ["Grand mean", overallMeanRBD],
+          ["CV (%)", statsRBD.cv],
+          ["CD (5%)", statsRBD.cd5],
+          ["SEm", statsRBD.sem],
+          ["SEd", statsRBD.sed],
+          ["H2 (broad sense, %)", statsRBD.h2],
+          ["GA", statsRBD.ga],
+          ["GA (% of mean)", statsRBD.gaPct],
+          ["PCV (%)", statsRBD.pcv],
+          ["GCV (%)", statsRBD.gcv],
+          ["ECV (%)", statsRBD.ecv],
+        ]
+      );
+      const matrixRBD = buildTable(
+        ["Component", "Variance", "Coefficient (%)"],
+        [
+          ["Genotypic (sigma^2g)", statsRBD.sigmaG, statsRBD.gcv],
+          ["Environmental (sigma^2e)", statsRBD.sigmaE, statsRBD.ecv],
+          ["Phenotypic (sigma^2p)", statsRBD.sigmaP, statsRBD.pcv],
+        ]
+      );
+      $("#rbdTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, anovaRows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryRBD}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixRBD}`;
 
       const deviationHtml = deviationBanner(
         "rbd",
@@ -1455,6 +1508,7 @@
         `Highest mean: ${best.treatment} (mean=${best.mean.toFixed(3)})` +
         (runnerUp ? `, second: ${runnerUp.treatment} (mean=${runnerUp.mean.toFixed(3)}).` : ".") +
         `\n\n` +
+        `Genetic summary: H2=${statsRBD.h2.toFixed(2)}%, GA=${statsRBD.ga.toFixed(3)}, PCV=${statsRBD.pcv.toFixed(2)}%, GCV=${statsRBD.gcv.toFixed(2)}%, ECV=${statsRBD.ecv.toFixed(2)}%.\n\n` +
         `BKQuant note: significance uses approximate thresholds for offline demo purposes. Use official F tables/software for exact p-values.`;
 
       setInterpretation(
@@ -1713,7 +1767,38 @@
         ["Error", ssError, dfError, msError, "", ""],
         ["Total", ssTotal, dfTotal, "", "", ""],
       ];
-      $("#factTableWrap").innerHTML = buildTable(headers, rows);
+      const overallMeanFact = mean(comboMeans.map((m) => m.mean));
+      const statsFact = computeBreedingSummaryStats({
+        meanValue: overallMeanFact,
+        msGenotype: msAB + msA + msB, // combined signal proxy for factorial treatment variability
+        msError: msError,
+        replications: r,
+      });
+      const summaryFact = buildTable(
+        ["Summary metric", "Value"],
+        [
+          ["Grand mean", overallMeanFact],
+          ["CV (%)", statsFact.cv],
+          ["CD (5%)", statsFact.cd5],
+          ["SEm", statsFact.sem],
+          ["SEd", statsFact.sed],
+          ["H2 (broad sense, %)", statsFact.h2],
+          ["GA", statsFact.ga],
+          ["GA (% of mean)", statsFact.gaPct],
+          ["PCV (%)", statsFact.pcv],
+          ["GCV (%)", statsFact.gcv],
+          ["ECV (%)", statsFact.ecv],
+        ]
+      );
+      const matrixFact = buildTable(
+        ["Component", "Variance", "Coefficient (%)"],
+        [
+          ["Genotypic (sigma^2g)", statsFact.sigmaG, statsFact.gcv],
+          ["Environmental (sigma^2e)", statsFact.sigmaE, statsFact.ecv],
+          ["Phenotypic (sigma^2p)", statsFact.sigmaP, statsFact.pcv],
+        ]
+      );
+      $("#factTableWrap").innerHTML = `<h4>Table 1. ANOVA summary</h4>${buildTable(headers, rows)}<div style="height:10px"></div><h4>Table 2. Mean and genetic summary (CV, CD, SEm, SEd, H2, GA)</h4>${summaryFact}<div style="height:10px"></div><h4>Table 3. PCV/GCV/ECV matrix</h4>${matrixFact}`;
 
       const deviationHtml = deviationBanner(
         "factorial",
@@ -1730,6 +1815,7 @@
         `• F(A×B) = ${fAB.toFixed(4)} (${sigAB.note})\n\n` +
         `If A×B is significant, the ranking of A or B levels changes across the other factor (cross-over interaction).\n` +
         `In your data, the highest mean combination is ${best.label} (mean=${best.mean.toFixed(3)}).\n\n` +
+        `Genetic summary: H2=${statsFact.h2.toFixed(2)}%, GA=${statsFact.ga.toFixed(3)}, PCV=${statsFact.pcv.toFixed(2)}%, GCV=${statsFact.gcv.toFixed(2)}%, ECV=${statsFact.ecv.toFixed(2)}%.\n\n` +
         `BKQuant note: significance uses approximate thresholds for offline use. For formal reports, consult official F tables or full statistical software.`;
 
       setInterpretation(
