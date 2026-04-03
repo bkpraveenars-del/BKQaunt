@@ -27,6 +27,82 @@
     URL.revokeObjectURL(url);
   }
 
+  function parseCsv(text) {
+    // Lightweight CSV parser supporting quoted fields and commas.
+    const rows = [];
+    let i = 0;
+    let field = "";
+    let row = [];
+    let inQuotes = false;
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') {
+            field += '"';
+            i += 2;
+            continue;
+          }
+          inQuotes = false;
+          i++;
+          continue;
+        }
+        field += ch;
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+        continue;
+      }
+      if (ch === ",") {
+        row.push(field);
+        field = "";
+        i++;
+        continue;
+      }
+      if (ch === "\n" || ch === "\r") {
+        if (ch === "\r" && text[i + 1] === "\n") i++;
+        row.push(field);
+        field = "";
+        const hasContent = row.some((c) => String(c).trim().length > 0);
+        if (hasContent) rows.push(row);
+        row = [];
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+    }
+    row.push(field);
+    if (row.some((c) => String(c).trim().length > 0)) rows.push(row);
+    return rows;
+  }
+
+  function parseNumericCsvMatrix(text) {
+    const rows = parseCsv(text);
+    if (!rows.length) return [];
+    return rows
+      .map((r) => r.map((x) => Number(String(x).trim())))
+      .filter((r) => r.some((x) => Number.isFinite(x)));
+  }
+
+  function triggerCsvDownload(filename, rows) {
+    const csv = rows
+      .map((r) =>
+        r
+          .map((v) => {
+            const s = String(v ?? "");
+            if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+            return s;
+          })
+          .join(",")
+      )
+      .join("\r\n");
+    downloadBlob(filename, "text/csv;charset=utf-8", csv);
+  }
+
   function canvasToDataUrl(canvas) {
     try {
       return canvas.toDataURL("image/png");
@@ -3189,6 +3265,9 @@
             <div id="ltGridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="ltCompute">Compute Line x Tester</button>
+              <button class="action-btn" type="button" id="ltImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="ltTemplateCsv">Download template CSV</button>
+              <input type="file" id="ltCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -3250,6 +3329,47 @@
       const t = Math.max(2, Number($("#ltT").value || defaultT));
       const r = Math.max(2, Number($("#ltR").value || defaultR));
       buildGrid(l, t, r);
+    });
+
+    $("#ltTemplateCsv").addEventListener("click", () => {
+      const l = Math.max(2, Number($("#ltL").value || defaultL));
+      const t = Math.max(2, Number($("#ltT").value || defaultT));
+      const r = Math.max(2, Number($("#ltR").value || defaultR));
+      const headers = Array.from({ length: r }, (_, k) => `R${k + 1}`);
+      const rows = [headers];
+      for (let i = 0; i < l; i++) {
+        for (let j = 0; j < t; j++) {
+          rows.push(Array.from({ length: r }, (_, k) => (20 + i * 3 + j * 2 + k * 0.5).toFixed(2)));
+        }
+      }
+      triggerCsvDownload("line_tester_matrix_template.csv", rows);
+    });
+    $("#ltImportCsv").addEventListener("click", () => $("#ltCsvFile").click());
+    $("#ltCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      const totalRows = mat.length;
+      const r = Math.max(2, Math.min(20, mat[0].length || defaultR));
+      const l = Math.max(2, Math.min(20, Number($("#ltL").value || defaultL)));
+      const t = Math.max(2, Math.floor(totalRows / l));
+      $("#ltR").value = String(r);
+      $("#ltT").value = String(t);
+      buildGrid(l, t, r);
+      let idx = 0;
+      for (let i = 0; i < l; i++) for (let j = 0; j < t; j++) {
+        const row = mat[idx++] || [];
+        for (let k = 0; k < r; k++) {
+          const v = row[k];
+          if (!Number.isFinite(v)) continue;
+          const input = document.querySelector(`#ltGridWrap input[data-cell="l${i}t${j}r${k}"]`);
+          if (input) input.value = String(v);
+        }
+      }
+      $("#ltCompute").click();
+      e.target.value = "";
     });
 
     $("#ltCompute").addEventListener("click", () => {
@@ -3449,6 +3569,9 @@
             <div id="dgInputWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="dgCompute">Draw graphical approach</button>
+              <button class="action-btn" type="button" id="dgImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="dgTemplateCsv">Download template CSV</button>
+              <input type="file" id="dgCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -3627,6 +3750,36 @@
       setInterpretation("diallel", interpretation, deviationHtml || "", { slope: fit.slope, intercept: fit.intercept });
     });
 
+    $("#dgTemplateCsv").addEventListener("click", () => {
+      const n = Math.max(3, Math.min(12, Number($("#dgN").value || defaultN)));
+      const rows = [["Parent", "Vr", "Wr"]];
+      for (let i = 0; i < n; i++) rows.push([`P${i + 1}`, (0.6 + i * 0.3).toFixed(2), (0.5 + i * 0.25).toFixed(2)]);
+      triggerCsvDownload("diallel_graphical_template.csv", rows);
+    });
+    $("#dgImportCsv").addEventListener("click", () => $("#dgCsvFile").click());
+    $("#dgCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const rows = parseCsv(txt);
+      if (rows.length < 2) return;
+      const data = rows.slice(1);
+      const n = Math.max(3, Math.min(12, data.length));
+      $("#dgN").value = String(n);
+      buildTableInputs(n);
+      for (let i = 0; i < n; i++) {
+        const r = data[i] || [];
+        const vr = Number(r[1]);
+        const wr = Number(r[2]);
+        const vrIn = document.querySelector(`#dgInputWrap input[data-vr="p${i}"]`);
+        const wrIn = document.querySelector(`#dgInputWrap input[data-wr="p${i}"]`);
+        if (vrIn && Number.isFinite(vr)) vrIn.value = String(vr);
+        if (wrIn && Number.isFinite(wr)) wrIn.value = String(wr);
+      }
+      $("#dgCompute").click();
+      e.target.value = "";
+    });
+
     $("#dgOpenDA1").addEventListener("click", renderDiallelDA1);
     $("#dgOpenDA2").addEventListener("click", renderDiallelDA2);
     $("#dgOpenDA3").addEventListener("click", renderDiallelDA3);
@@ -3677,6 +3830,9 @@
             <div id="da1GridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="da1Compute">Compute DA I</button>
+              <button class="action-btn" type="button" id="da1ImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="da1TemplateCsv">Download template CSV</button>
+              <input type="file" id="da1CsvFile" accept=".csv,text/csv" style="display:none" />
               <button class="action-btn" type="button" id="da1BackGraph">Back to graphical approach</button>
             </div>
           </div>
@@ -3743,6 +3899,36 @@
     $("#da1OpenDA2").addEventListener("click", renderDiallelDA2);
     $("#da1OpenDA3").addEventListener("click", renderDiallelDA3);
     $("#da1OpenDA4").addEventListener("click", renderDiallelDA4);
+
+    $("#da1TemplateCsv").addEventListener("click", () => {
+      const p = Math.max(3, Math.min(10, Number($("#da1N").value || defaultN)));
+      const rows = [Array.from({ length: p }, (_, j) => `P${j + 1}`)];
+      for (let i = 0; i < p; i++) {
+        const row = [];
+        for (let j = 0; j < p; j++) row.push((22 + i * 1.4 + j * 1.1 + (i === j ? 0 : 3)).toFixed(2));
+        rows.push(row);
+      }
+      triggerCsvDownload("diallel_da1_matrix_template.csv", rows);
+    });
+    $("#da1ImportCsv").addEventListener("click", () => $("#da1CsvFile").click());
+    $("#da1CsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      const p = Math.max(3, Math.min(10, mat.length));
+      $("#da1N").value = String(p);
+      buildMatrix(p);
+      for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) {
+        const v = mat[i]?.[j];
+        if (!Number.isFinite(v)) continue;
+        const input = document.querySelector(`#da1GridWrap input[data-da1="i${i}j${j}"]`);
+        if (input) input.value = String(v);
+      }
+      $("#da1Compute").click();
+      e.target.value = "";
+    });
 
     $("#da1Compute").addEventListener("click", () => {
       const p = Math.max(3, Math.min(10, Number($("#da1N").value || defaultN)));
@@ -4974,6 +5160,9 @@
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="metCompute">Compute MET summary</button>
               <button class="action-btn" type="button" id="metERCompute">Compute Eberhart-Russell</button>
+              <button class="action-btn" type="button" id="metImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="metTemplateCsv">Download template CSV</button>
+              <input type="file" id="metCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -5033,6 +5222,38 @@
       const g = Math.max(2, Math.min(30, Number($("#metG").value || defaultG)));
       const e = Math.max(2, Math.min(12, Number($("#metE").value || defaultE)));
       build(g, e);
+    });
+
+    $("#metTemplateCsv").addEventListener("click", () => {
+      const g = Math.max(2, Math.min(30, Number($("#metG").value || defaultG)));
+      const e = Math.max(2, Math.min(12, Number($("#metE").value || defaultE)));
+      const rows = [Array.from({ length: e }, (_, j) => `E${j + 1}`)];
+      for (let i = 0; i < g; i++) {
+        rows.push(Array.from({ length: e }, (_, j) => (25 + i * 1.2 + j * 0.9).toFixed(2)));
+      }
+      triggerCsvDownload("met_matrix_template.csv", rows);
+    });
+    $("#metImportCsv").addEventListener("click", () => $("#metCsvFile").click());
+    $("#metCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      // If first row likely header (non-numeric), parser strips it by numeric filter.
+      const g = Math.max(2, Math.min(30, mat.length));
+      const eN = Math.max(2, Math.min(12, Math.min(...mat.map((r) => r.length))));
+      $("#metG").value = String(g);
+      $("#metE").value = String(eN);
+      build(g, eN);
+      for (let i = 0; i < g; i++) for (let j = 0; j < eN; j++) {
+        const v = mat[i]?.[j];
+        if (!Number.isFinite(v)) continue;
+        const input = document.querySelector(`#metWrap input[data-met="g${i}e${j}"]`);
+        if (input) input.value = String(v);
+      }
+      $("#metCompute").click();
+      e.target.value = "";
     });
 
     $("#metCompute").addEventListener("click", () => {
@@ -5203,6 +5424,9 @@
             <div id="ammiWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="ammiCompute">Compute AMMI</button>
+              <button class="action-btn" type="button" id="ammiImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="ammiTemplateCsv">Download template CSV</button>
+              <input type="file" id="ammiCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -5309,6 +5533,35 @@
       const g = Math.max(2, Math.min(30, Number($("#ammiG").value || defaultG)));
       const e = Math.max(2, Math.min(12, Number($("#ammiE").value || defaultE)));
       build(g, e);
+    });
+
+    $("#ammiTemplateCsv").addEventListener("click", () => {
+      const g = Math.max(2, Math.min(30, Number($("#ammiG").value || defaultG)));
+      const e = Math.max(2, Math.min(12, Number($("#ammiE").value || defaultE)));
+      const rows = [Array.from({ length: e }, (_, j) => `E${j + 1}`)];
+      for (let i = 0; i < g; i++) rows.push(Array.from({ length: e }, (_, j) => (24 + i * 1.1 + j * 0.9).toFixed(2)));
+      triggerCsvDownload("ammi_matrix_template.csv", rows);
+    });
+    $("#ammiImportCsv").addEventListener("click", () => $("#ammiCsvFile").click());
+    $("#ammiCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      const g = Math.max(2, Math.min(30, mat.length));
+      const eN = Math.max(2, Math.min(12, Math.min(...mat.map((r) => r.length))));
+      $("#ammiG").value = String(g);
+      $("#ammiE").value = String(eN);
+      build(g, eN);
+      for (let i = 0; i < g; i++) for (let j = 0; j < eN; j++) {
+        const v = mat[i]?.[j];
+        if (!Number.isFinite(v)) continue;
+        const input = document.querySelector(`#ammiWrap input[data-ammi="g${i}e${j}"]`);
+        if (input) input.value = String(v);
+      }
+      $("#ammiCompute").click();
+      e.target.value = "";
     });
 
     $("#ammiCompute").addEventListener("click", () => {
@@ -5438,6 +5691,9 @@
             <div id="dfaWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="dfaCompute">Compute Discriminant Function</button>
+              <button class="action-btn" type="button" id="dfaImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="dfaTemplateCsv">Download template CSV</button>
+              <input type="file" id="dfaCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -5529,6 +5785,43 @@
     $("#dfaBuild").addEventListener("click", () => {
       const n = Math.max(4, Math.min(40, Number($("#dfaN").value || defaultN)));
       build(n);
+    });
+
+    $("#dfaTemplateCsv").addEventListener("click", () => {
+      const n = Math.max(4, Math.min(40, Number($("#dfaN").value || defaultN)));
+      const rows = [["group", "x1", "x2"]];
+      for (let i = 0; i < n; i++) rows.push(["A", (12 + i * 0.8).toFixed(2), (8 + i * 0.5).toFixed(2)]);
+      for (let i = 0; i < n; i++) rows.push(["B", (17 + i * 0.7).toFixed(2), (11 + i * 0.45).toFixed(2)]);
+      triggerCsvDownload("discriminant_grouped_template.csv", rows);
+    });
+    $("#dfaImportCsv").addEventListener("click", () => $("#dfaCsvFile").click());
+    $("#dfaCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const rows = parseCsv(txt);
+      if (rows.length < 2) return;
+      const data = rows.slice(1);
+      const A = data.filter((r) => String(r[0]).trim().toUpperCase() === "A");
+      const B = data.filter((r) => String(r[0]).trim().toUpperCase() === "B");
+      const n = Math.max(4, Math.min(40, Math.min(A.length, B.length)));
+      $("#dfaN").value = String(n);
+      build(n);
+      for (let i = 0; i < n; i++) {
+        const a = A[i] || [];
+        const b = B[i] || [];
+        const ax1 = Number(a[1]), ax2 = Number(a[2]), bx1 = Number(b[1]), bx2 = Number(b[2]);
+        const ai1 = document.querySelector(`#dfaWrap input[data-dfa="A${i}-x1"]`);
+        const ai2 = document.querySelector(`#dfaWrap input[data-dfa="A${i}-x2"]`);
+        const bi1 = document.querySelector(`#dfaWrap input[data-dfa="B${i}-x1"]`);
+        const bi2 = document.querySelector(`#dfaWrap input[data-dfa="B${i}-x2"]`);
+        if (ai1 && Number.isFinite(ax1)) ai1.value = String(ax1);
+        if (ai2 && Number.isFinite(ax2)) ai2.value = String(ax2);
+        if (bi1 && Number.isFinite(bx1)) bi1.value = String(bx1);
+        if (bi2 && Number.isFinite(bx2)) bi2.value = String(bx2);
+      }
+      $("#dfaCompute").click();
+      e.target.value = "";
     });
 
     $("#dfaCompute").addEventListener("click", () => {
@@ -5680,6 +5973,9 @@
             <div id="faWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="faCompute">Compute Factor Analysis</button>
+              <button class="action-btn" type="button" id="faImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="faTemplateCsv">Download template CSV</button>
+              <input type="file" id="faCsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -5769,6 +6065,36 @@
     $("#faBuild").addEventListener("click", () => {
       const p = Math.max(2, Math.min(8, Number($("#faP").value || defaultP)));
       build(p);
+    });
+
+    $("#faTemplateCsv").addEventListener("click", () => {
+      const p = Math.max(2, Math.min(8, Number($("#faP").value || defaultP)));
+      const rows = [Array.from({ length: p }, (_, j) => `Trait${j + 1}`)];
+      for (let i = 0; i < p; i++) {
+        const row = [];
+        for (let j = 0; j < p; j++) row.push(i === j ? "1" : (0.2 + (i + 1) * 0.08 + (j + 1) * 0.05).toFixed(2));
+        rows.push(row);
+      }
+      triggerCsvDownload("factor_analysis_corr_template.csv", rows);
+    });
+    $("#faImportCsv").addEventListener("click", () => $("#faCsvFile").click());
+    $("#faCsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      const p = Math.max(2, Math.min(8, mat.length));
+      $("#faP").value = String(p);
+      build(p);
+      for (let i = 0; i < p; i++) for (let j = i + 1; j < p; j++) {
+        const v = mat[i]?.[j];
+        if (!Number.isFinite(v)) continue;
+        const input = document.querySelector(`#faWrap input[data-fa="i${i}j${j}"]`);
+        if (input) input.value = String(v);
+      }
+      $("#faCompute").click();
+      e.target.value = "";
     });
 
     $("#faCompute").addEventListener("click", () => {
@@ -5913,6 +6239,9 @@
             </div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="d2Compute">Compute D2 and clustering</button>
+              <button class="action-btn" type="button" id="d2ImportCsv">Import CSV</button>
+              <button class="action-btn" type="button" id="d2TemplateCsv">Download template CSV</button>
+              <input type="file" id="d2CsvFile" accept=".csv,text/csv" style="display:none" />
             </div>
           </div>
         </div>
@@ -6250,6 +6579,35 @@
       const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
       const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
       build(n, p);
+    });
+
+    $("#d2TemplateCsv").addEventListener("click", () => {
+      const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
+      const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
+      const rows = [Array.from({ length: p }, (_, j) => `Trait${j + 1}`)];
+      for (let i = 0; i < n; i++) rows.push(Array.from({ length: p }, (_, j) => (10 + i * 0.8 + j * 1.1).toFixed(2)));
+      triggerCsvDownload("d2_trait_matrix_template.csv", rows);
+    });
+    $("#d2ImportCsv").addEventListener("click", () => $("#d2CsvFile").click());
+    $("#d2CsvFile").addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const mat = parseNumericCsvMatrix(txt);
+      if (!mat.length) return;
+      const n = Math.max(5, Math.min(40, mat.length));
+      const p = Math.max(2, Math.min(10, Math.min(...mat.map((r) => r.length))));
+      $("#d2N").value = String(n);
+      $("#d2T").value = String(p);
+      build(n, p);
+      for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
+        const v = mat[i]?.[j];
+        if (!Number.isFinite(v)) continue;
+        const input = document.querySelector(`#d2Wrap input[data-d2="g${i}t${j}"]`);
+        if (input) input.value = String(v);
+      }
+      $("#d2Compute").click();
+      e.target.value = "";
     });
 
     $("#d2Compute").addEventListener("click", () => {
