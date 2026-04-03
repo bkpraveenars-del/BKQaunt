@@ -7083,7 +7083,8 @@
     const title = "D2 Analysis and Cluster Diagrams";
     showContentHeader({
       title,
-      subtitle: "Multiple clustering methods (K-means, UPGMA, Tocher, Ward), consensus dendrogram, and heterosis outputs.",
+      subtitle:
+        "Mahalanobis D² from pooled covariance (ridge-regularized); clustering on √(D²) or whitened coordinates. UPGMA dendrogram + consensus co-assignment tree; heterosis outputs.",
     });
 
     const defaultN = 10;
@@ -7091,7 +7092,7 @@
     const bodyHtml = `
       <div class="kpi-row">
         <div class="kpi"><div class="label">Clustering methods</div><div class="value">K-means, UPGMA, Tocher, Ward</div></div>
-        <div class="kpi"><div class="label">Combined output</div><div class="value">Consensus dendrogram</div></div>
+        <div class="kpi"><div class="label">D² output</div><div class="value">Intra/inter D² + UPGMA + consensus</div></div>
         <div class="kpi"><div class="label">Extra output</div><div class="value">Mid-parent and better-parent heterosis</div></div>
       </div>
       <div style="height:12px"></div>
@@ -7150,7 +7151,11 @@
             <h4>Results</h4>
             <div id="d2Kpis"></div>
             <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2ClusterChart" style="width:100%;height:100%"></canvas></div>
-            <div class="chart" style="height:300px;margin-top:12px"><canvas id="d2DendroChart" style="width:100%;height:100%"></canvas></div>
+            <div class="muted small" style="margin-top:6px">Scatter uses first two Mahalanobis-whitened trait axes (when available).</div>
+            <div class="chart" style="height:280px;margin-top:12px"><canvas id="d2DendroChart" style="width:100%;height:100%"></canvas></div>
+            <div class="muted small" style="margin-top:4px">UPGMA on Mahalanobis distance D = √(D²); red line = cut height (%).</div>
+            <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2DendroConsensusChart" style="width:100%;height:100%"></canvas></div>
+            <div class="muted small" style="margin-top:4px">Consensus dendrogram (Ward on co-assignment dissimilarity 1 − S).</div>
             <div id="d2Tables" style="margin-top:12px"></div>
           </div>
         </div>
@@ -7226,14 +7231,138 @@
       return s;
     }
 
-    function distanceMatrix(X) {
-      const n = X.length;
-      const D = Array.from({ length: n }, () => Array(n).fill(0));
-      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-        const d = Math.sqrt(sqDist(X[i], X[j]));
-        D[i][j] = d; D[j][i] = d;
+    /** Cholesky L with S ≈ L Lᵀ (lower triangular). Returns null if not SPD. */
+    function choleskyDecompose(S) {
+      const n = S.length;
+      const L = Array.from({ length: n }, () => Array(n).fill(0));
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j <= i; j++) {
+          let sum = S[i][j];
+          for (let k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+          if (i === j) {
+            if (sum <= 1e-15) return null;
+            L[i][j] = Math.sqrt(sum);
+          } else {
+            L[i][j] = sum / L[j][j];
+          }
+        }
       }
-      return D;
+      return L;
+    }
+
+    function solveLowerTriangular(L, b) {
+      const n = L.length;
+      const x = Array(n).fill(0);
+      for (let i = 0; i < n; i++) {
+        let sum = b[i];
+        for (let k = 0; k < i; k++) sum -= L[i][k] * x[k];
+        x[i] = sum / L[i][i];
+      }
+      return x;
+    }
+
+    /**
+     * Pooled-sample Mahalanobis D² between genotypes; D = √(D²) for linkage.
+     * Ridge on diagonal stabilizes S⁻¹ when p is large or n is small.
+     */
+    function mahalanobisFromX(X) {
+      const n = X.length;
+      const p = X[0].length;
+      const mu = Array(p).fill(0);
+      for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) mu[j] += X[i][j];
+      for (let j = 0; j < p; j++) mu[j] /= n;
+      const C = Array.from({ length: p }, () => Array(p).fill(0));
+      for (let i = 0; i < n; i++) {
+        for (let a = 0; a < p; a++) {
+          const da = X[i][a] - mu[a];
+          for (let b = 0; b < p; b++) C[a][b] += da * (X[i][b] - mu[b]);
+        }
+      }
+      const nf = Math.max(1, n - 1);
+      for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) C[a][b] /= nf;
+      const trace = C.reduce((s, row, i) => s + row[i], 0);
+      const ridge = Math.max(1e-12, 1e-4 * (trace / Math.max(1, p)));
+      const Cp = C.map((row, i) => row.map((v, j) => (i === j ? v + ridge : v)));
+      const L = choleskyDecompose(Cp);
+      const D2 = Array.from({ length: n }, () => Array(n).fill(0));
+      const D = Array.from({ length: n }, () => Array(n).fill(0));
+      if (!L) {
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const d2 = sqDist(X[i], X[j]);
+            D2[i][j] = d2;
+            D2[j][i] = d2;
+            const d = Math.sqrt(Math.max(0, d2));
+            D[i][j] = d;
+            D[j][i] = d;
+          }
+        }
+        return { D2, D, Z: X, mu, ridge, fallback: "euclidean" };
+      }
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const delta = X[i].map((v, t) => v - X[j][t]);
+          const w = solveLowerTriangular(L, delta);
+          let d2 = 0;
+          for (let t = 0; t < p; t++) d2 += w[t] * w[t];
+          D2[i][j] = d2;
+          D2[j][i] = d2;
+          const d = Math.sqrt(Math.max(0, d2));
+          D[i][j] = d;
+          D[j][i] = d;
+        }
+      }
+      const Z = Array.from({ length: n }, () => Array(p).fill(0));
+      for (let i = 0; i < n; i++) {
+        const delta = X[i].map((v, t) => v - mu[t]);
+        Z[i] = solveLowerTriangular(L, delta);
+      }
+      return { D2, D, Z, mu, ridge, fallback: null };
+    }
+
+    /** Mean pairwise D² within / between consensus clusters (full matrix). */
+    function clusterIntraInterD2MeanMatrix(D2, clusters, cKeys) {
+      const k = cKeys.length;
+      const M = Array.from({ length: k }, () => Array(k).fill(0));
+      for (let a = 0; a < k; a++) {
+        for (let b = 0; b < k; b++) {
+          const ai = clusters[cKeys[a]];
+          const bi = clusters[cKeys[b]];
+          let s = 0;
+          let c = 0;
+          if (a === b) {
+            for (let ii = 0; ii < ai.length; ii++) {
+              for (let jj = ii + 1; jj < ai.length; jj++) {
+                s += D2[ai[ii]][ai[jj]];
+                c++;
+              }
+            }
+          } else {
+            for (const i of ai) for (const j of bi) {
+              s += D2[i][j];
+              c++;
+            }
+          }
+          M[a][b] = c ? s / c : 0;
+        }
+      }
+      return M;
+    }
+
+    /** Unrooted-style Newick from UPGMA linkage (merge order = algorithm order). */
+    function linkageToNewickString(linkage, n) {
+      const nodes = new Map();
+      for (let i = 0; i < n; i++) nodes.set(i, `G${i + 1}`);
+      let newId = n;
+      for (const [a, b] of linkage) {
+        const left = nodes.get(a);
+        const right = nodes.get(b);
+        if (left == null || right == null) return "(incomplete merge tree)";
+        const s = `(${left},${right})`;
+        nodes.set(newId, s);
+        newId++;
+      }
+      return nodes.get(newId - 1) || "";
     }
 
     function kmeans(X, k, iters = 40) {
@@ -7388,10 +7517,13 @@
       return { S, link };
     }
 
-    function drawSimpleScatterClusters(canvas, X, labels, pointSize) {
-      // use first two traits as axes
+    function drawSimpleScatterClusters(canvas, X, labels, pointSize, opts = {}) {
       const points = X.map((r, i) => ({ x: r[0], y: r[1] ?? 0, c: labels[i], name: `G${i + 1}` }));
-      drawScatterPlot(canvas, points, { title: "Cluster scatter (Trait1 vs Trait2)", xLabel: "Trait1", yLabel: "Trait2" });
+      drawScatterPlot(canvas, points, {
+        title: opts.title || "Cluster scatter (Trait1 vs Trait2)",
+        xLabel: opts.xLabel || "Trait1",
+        yLabel: opts.yLabel || "Trait2",
+      });
       const ctx = canvas.getContext("2d");
       const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const rect = canvas.getBoundingClientRect();
@@ -7533,16 +7665,16 @@
       const methods = [];
       const labelSets = [];
 
-      const D = distanceMatrix(Xuse);
+      const { D2, D, Z, fallback: mahalFallback } = mahalanobisFromX(Xuse);
+      const linkUpgmaD = upgmaLinkage(D);
 
       if (useK) {
-        const lab = kmeans(Xuse, Math.min(k, n));
+        const lab = kmeans(Z, Math.min(k, n));
         methods.push("K-means");
         labelSets.push(lab);
       }
       if (useU) {
-        const link = upgmaLinkage(D);
-        const lab = labelsFromLinkage(link, n, Math.min(k, n));
+        const lab = labelsFromLinkage(linkUpgmaD, n, Math.min(k, n));
         methods.push("UPGMA");
         labelSets.push(lab);
       }
@@ -7552,7 +7684,7 @@
         labelSets.push(lab);
       }
       if (useW) {
-        const link = wardLinkage(Xuse);
+        const link = wardLinkage(Z);
         const lab = labelsFromLinkage(link, n, Math.min(k, n));
         methods.push("Ward");
         labelSets.push(lab);
@@ -7568,10 +7700,19 @@
       const lineW = Math.max(1, Math.min(5, Number($("#d2LineW").value || 2)));
       const cut = Math.max(5, Math.min(95, Number($("#d2Cut").value || 60)));
 
-      drawSimpleScatterClusters($("#d2ClusterChart"), Xuse, consLab, pointSize);
-      drawDendrogram($("#d2DendroChart"), cons.link, n, lineW, cut);
+      const newickStr = linkageToNewickString(linkUpgmaD, n);
 
-      // cluster metrics from consensus labels
+      drawSimpleScatterClusters($("#d2ClusterChart"), Z, consLab, pointSize, {
+        title: mahalFallback
+          ? "Cluster scatter (Trait1 vs Trait2)"
+          : "Cluster scatter (Mahalanobis-whitened axes 1 vs 2)",
+        xLabel: mahalFallback ? "Trait1" : "Axis 1",
+        yLabel: mahalFallback ? "Trait2" : "Axis 2",
+      });
+      drawDendrogram($("#d2DendroChart"), linkUpgmaD, n, lineW, cut);
+      drawDendrogram($("#d2DendroConsensusChart"), cons.link, n, lineW, cut);
+
+      // cluster metrics from consensus labels (D² = Mahalanobis squared distance)
       const clusters = {};
       for (let i = 0; i < n; i++) {
         const c = consLab[i];
@@ -7579,32 +7720,55 @@
         clusters[c].push(i);
       }
       const cKeys = Object.keys(clusters).map(Number).sort((a, b) => a - b);
-      function avgIntra(idxs) {
-        let s = 0, c = 0;
-        for (let i = 0; i < idxs.length; i++) for (let j = i + 1; j < idxs.length; j++) {
-          s += D[idxs[i]][idxs[j]];
-          c++;
+      function avgIntraD2(idxs) {
+        if (idxs.length < 2) return 0;
+        let s = 0;
+        let c = 0;
+        for (let i = 0; i < idxs.length; i++) {
+          for (let j = i + 1; j < idxs.length; j++) {
+            s += D2[idxs[i]][idxs[j]];
+            c++;
+          }
         }
         return c ? s / c : 0;
       }
       let bestInter = 0;
-      for (let a = 0; a < cKeys.length; a++) for (let b = a + 1; b < cKeys.length; b++) {
-        let s = 0, c = 0;
-        for (const i of clusters[cKeys[a]]) for (const j of clusters[cKeys[b]]) { s += D[i][j]; c++; }
-        const m = c ? s / c : 0;
-        if (m > bestInter) bestInter = m;
+      for (let a = 0; a < cKeys.length; a++) {
+        for (let b = a + 1; b < cKeys.length; b++) {
+          let s = 0;
+          let c = 0;
+          for (const i of clusters[cKeys[a]]) for (const j of clusters[cKeys[b]]) {
+            s += D2[i][j];
+            c++;
+          }
+          const m = c ? s / c : 0;
+          if (m > bestInter) bestInter = m;
+        }
       }
-      const intraRows = cKeys.map((c) => [`Cluster ${c + 1}`, clusters[c].map((i) => `G${i + 1}`).join(", "), avgIntra(clusters[c]), clusters[c].length]);
+      let maxIntra = 0;
+      for (const ck of cKeys) maxIntra = Math.max(maxIntra, avgIntraD2(clusters[ck]));
+
+      const intraInterMat = clusterIntraInterD2MeanMatrix(D2, clusters, cKeys);
+      const intraRows = cKeys.map((c) => [
+        `Cluster ${c + 1}`,
+        clusters[c].map((i) => `G${i + 1}`).join(", "),
+        avgIntraD2(clusters[c]),
+        clusters[c].length,
+      ]);
 
       const het = heterosisRows();
       const mphMean = het.length ? mean(het.map((r) => r[4])) : 0;
       const bphMean = het.length ? mean(het.map((r) => r[5])) : 0;
 
       $("#d2Kpis").innerHTML = `
-        <div class="kpi-row" style="grid-template-columns:repeat(5, minmax(0,1fr))">
+        <div class="kpi-row" style="grid-template-columns:repeat(3, minmax(0,1fr))">
           <div class="kpi"><div class="label">Methods combined</div><div class="value">${methods.join(", ")}</div></div>
           <div class="kpi"><div class="label">Consensus clusters</div><div class="value">${cKeys.length}</div></div>
-          <div class="kpi"><div class="label">Max inter-cluster D</div><div class="value">${bestInter.toFixed(3)}</div></div>
+          <div class="kpi"><div class="label">Distance basis</div><div class="value">${mahalFallback ? "Euclidean (S not PD)" : "Mahalanobis D²"}</div></div>
+        </div>
+        <div class="kpi-row" style="grid-template-columns:repeat(4, minmax(0,1fr));margin-top:8px">
+          <div class="kpi"><div class="label">Max mean inter-cluster D²</div><div class="value">${bestInter.toFixed(4)}</div></div>
+          <div class="kpi"><div class="label">Max mean intra-cluster D²</div><div class="value">${maxIntra.toFixed(4)}</div></div>
           <div class="kpi"><div class="label">Mean MP heterosis</div><div class="value">${mphMean.toFixed(2)}%</div></div>
           <div class="kpi"><div class="label">Mean BP heterosis</div><div class="value">${bphMean.toFixed(2)}%</div></div>
         </div>
@@ -7647,12 +7811,27 @@
       ]);
       contribRows.sort((a, b) => Number(b[2]) - Number(a[2]));
       const tContrib = buildTable(
-        ["Trait", "Contribution sum (D2 basis)", "Contribution (%)"],
+        ["Trait", "Contribution sum (squared trait differences)", "Contribution (%)"],
         contribRows
       );
 
+      const cn = cKeys.map((_, i) => `C${i + 1}`);
+      const tIntraInter = buildTable(
+        ["Cluster (mean pairwise D²)", ...cn],
+        cKeys.map((_, i) => [`C${i + 1}`, ...cKeys.map((_, j) => intraInterMat[i][j].toFixed(4))])
+      );
+
+      const mergeRows = linkUpgmaD.map((row, step) => {
+        const [a, b, dist, sz] = row;
+        return [step + 1, a, b, dist.toFixed(4), sz];
+      });
+      const tMerge = buildTable(
+        ["Step", "Left id", "Right id", "Avg distance (UPGMA)", "Merged size"],
+        mergeRows
+      );
+
       const tCons = buildTable(
-        ["Consensus cluster", "Members", "Intra-cluster D (avg)", "Size"],
+        ["Consensus cluster", "Members", "Intra-cluster mean D²", "Size"],
         intraRows
       );
       const tHet = buildTable(
@@ -7661,32 +7840,47 @@
       );
       const qItemsD2 = [
         { check: "Methods selected", pass: methods.length >= 2, note: `${methods.length} method(s)` },
-        { check: "Cluster separability", pass: bestInter > 0.5, note: `max inter=${bestInter.toFixed(3)}` },
+        {
+          check: "Cluster separability (D²)",
+          pass: bestInter > 1e-12 && (maxIntra < 1e-12 || bestInter / maxIntra > 1.05),
+          note: `inter/intra D²≈${maxIntra > 1e-12 ? (bestInter / maxIntra).toFixed(2) : "—"}`,
+        },
         { check: "Cluster count adequacy", pass: cKeys.length >= 2, note: `${cKeys.length} consensus cluster(s)` },
       ];
       if (strictModeShouldBlock("d2", qItemsD2, "#d2Kpis")) return;
 
+      const dendroNote = `
+        <h4>Dendrogram structure (UPGMA on D = √(D²))</h4>
+        <p class="muted small">Nested parentheses follow merge order (informal Newick-style). Use the vertical cut line on the UPGMA dendrogram above to read the same number of groups as the target cluster count (subject to consensus).</p>
+        <pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:8px 0;padding:10px;border-radius:8px;border:1px solid var(--border, #334155);">${qs(newickStr)}</pre>
+      `;
+
       $("#d2Tables").innerHTML =
         `${qualityScoreHtml(qItemsD2)}<div style="height:10px"></div><h4>Table 1. Method-wise cluster counts</h4>${tMethod}` +
-        `<div style="height:10px"></div><h4>Table 2. Consensus clustering summary</h4>${tCons}` +
-        `<div style="height:10px"></div><h4>Table 3. Cluster means by traits</h4>${tClusterMeans}` +
-        `<div style="height:10px"></div><h4>Table 4. Trait-wise percentage contribution to D2</h4>${tContrib}` +
-        `<div style="height:10px"></div><h4>Table 5. Heterosis values</h4>${tHet}` +
-        `<div style="height:10px"></div>${assumptionsChecklistHtml("Table 6. Assumption checklist", [
+        `<div style="height:10px"></div><h4>Table 2. Consensus clustering summary (Mahalanobis D²)</h4>${tCons}` +
+        `<div style="height:10px"></div><h4>Table 3. Intra- and inter-cluster mean pairwise D²</h4>` +
+        `<p class="muted small">Diagonal: mean D² within cluster; off-diagonal: mean D² between clusters (symmetric).</p>${tIntraInter}` +
+        `<div style="height:10px"></div>${dendroNote}` +
+        `<div style="height:10px"></div><h4>Table 4. UPGMA merge order (D²-based distance)</h4>${tMerge}` +
+        `<div style="height:10px"></div><h4>Table 5. Cluster means by traits</h4>${tClusterMeans}` +
+        `<div style="height:10px"></div><h4>Table 6. Trait-wise contribution of raw squared differences</h4>${tContrib}` +
+        `<div style="height:10px"></div><h4>Table 7. Heterosis values</h4>${tHet}` +
+        `<div style="height:10px"></div>${assumptionsChecklistHtml("Table 8. Assumption checklist", [
           { assumption: "Trait scaling compatibility", status: "Recommended", note: "Standardize traits when units differ strongly." },
-          { assumption: "Euclidean distance relevance", status: "Assumed", note: "Alternative metrics may be suitable for specific datasets." },
-          { assumption: "Method agreement", status: "Recommended", note: "Consensus clustering improves robustness over single-method solutions." }
+          { assumption: "Mahalanobis D²", status: "Assumed", note: "Pooled covariance S with ridge; linkage uses D = √(D²). Fallback uses Euclidean if S is not PD." },
+          { assumption: "Method agreement", status: "Recommended", note: "Consensus clustering improves robustness over single-method solutions." },
         ])}`;
 
       const consensusSpread = cKeys.length;
       const deviationHtml = deviationBanner("d2", { bestInterCluster: bestInter, consensusSpread }, ["bestInterCluster", "consensusSpread"]);
       const interpretation =
-        `D2 analysis with multiple clustering methods provides robust grouping by comparing method-specific partitions and a combined consensus pattern.\n\n` +
+        `Mahalanobis D² uses pooled covariance among genotypes (ridge-regularized); clustering uses D = √(D²) for UPGMA/Tocher and whitened coordinates for K-means/Ward.\n\n` +
         `Combined methods: ${methods.join(", ")}.\n` +
-        `Consensus clusters: ${cKeys.length}, max inter-cluster distance=${bestInter.toFixed(3)}.\n` +
-        `Top D2-contributing trait: ${String(contribRows[0]?.[0] || "Trait1")} (${Number(contribRows[0]?.[2] || 0).toFixed(2)}%).\n\n` +
+        `Consensus clusters: ${cKeys.length}; max mean inter-cluster D²=${bestInter.toFixed(4)}, max mean intra-cluster D²=${maxIntra.toFixed(4)}.\n` +
+        `UPGMA dendrogram (primary) and the nested Newick-style string summarize the same D²-based hierarchy; cross-cluster means in Table 3 quantify separation.\n` +
+        `Largest raw trait-difference contribution: ${String(contribRows[0]?.[0] || "Trait1")} (${Number(contribRows[0]?.[2] || 0).toFixed(2)}%).\n\n` +
         `Heterosis summary: mean MPH=${mphMean.toFixed(2)}%, mean BPH=${bphMean.toFixed(2)}%.\n` +
-        `Large inter-cluster distances and positive heterosis in selected inter-cluster crosses support divergence-based hybrid selection.`;
+        `Large inter-cluster D² and positive heterosis in selected inter-cluster crosses support divergence-based hybrid selection.`;
       setInterpretation("d2", interpretation, deviationHtml || "", { bestInterCluster: bestInter, consensusSpread });
       setRunMeta("d2", { forceRun: isForceRunEnabled(), inputSize: `n=${n}, p=${traitCount}, methods=${methods.length}`, standardization: std ? "z-score columns" : "none", preprocessing: "Trait matrix checked; clustering used selected methods.", qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsD2.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
@@ -7976,11 +8170,745 @@
     setInterpretation(moduleId, interpretation, deviationHtml, payload || null);
   }
 
+  // --- Biometric Report (summary, correlation heatmap, Plotly charts, ANOVA) ---
+  function studentTInvTwoTail(df, alphaTwoTail) {
+    const p = 1 - alphaTwoTail / 2;
+    if (typeof jStat !== "undefined" && jStat.studentt && typeof jStat.studentt.inv === "function") {
+      return jStat.studentt.inv(p, df);
+    }
+    if (df >= 120) return alphaTwoTail === 0.05 ? 1.96 : 2.576;
+    const table = [
+      [1, 12.706, 63.657],
+      [2, 4.303, 9.925],
+      [3, 3.182, 5.841],
+      [4, 2.776, 4.604],
+      [5, 2.571, 4.032],
+      [10, 2.228, 3.169],
+      [20, 2.086, 2.845],
+      [30, 2.042, 2.75],
+    ];
+    const row = table.find((r) => r[0] === df) || table.find((r) => r[0] >= df) || [30, 2.042, 2.75];
+    return alphaTwoTail === 0.05 ? row[1] : row[2];
+  }
+
+  function parseBiometricTraitMatrix(text) {
+    const lines = (text || "").trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length < 3) return { error: "Provide at least 3 rows (header + 2 genotypes) and 2+ trait columns." };
+    const raw = lines.map((l) => l.split(/[\t,;]+/).map((s) => s.trim()));
+    const top = raw[0];
+    const firstCellNum = Number.isFinite(Number(top[0]));
+    let rowNames = [];
+    let colNames = [];
+    let data = [];
+    if (!firstCellNum && top.length > 1) {
+      colNames = top.slice(1);
+      for (let i = 1; i < raw.length; i++) {
+        const row = raw[i];
+        rowNames.push(String(row[0] || `G${i}`));
+        const nums = row.slice(1, 1 + colNames.length).map((s) => Number(s));
+        if (nums.length !== colNames.length || nums.some((n) => !Number.isFinite(n))) {
+          return { error: `Row ${i + 1}: expected ${colNames.length} numeric trait values after the label.` };
+        }
+        data.push(nums);
+      }
+    } else {
+      colNames = top.map((_, j) => `Trait${j + 1}`);
+      data = raw.map((row, i) => {
+        rowNames.push(`G${i + 1}`);
+        return row.map((s) => Number(s));
+      });
+      if (data.some((row) => row.some((n) => !Number.isFinite(n)))) return { error: "All trait cells must be numeric." };
+    }
+    if (data.length < 2 || colNames.length < 2) {
+      return { error: "Need at least 2 genotypes (rows) and 2 traits (columns) for correlation and summaries." };
+    }
+    return { rowNames, colNames, data };
+  }
+
+  function parseCrdRepMatrix(text) {
+    const rawT = (text || "").trim();
+    if (!rawT) return { skip: true };
+    const lines = rawT.split(/\r?\n/).filter(Boolean);
+    if (lines.length < 2) return { skip: true };
+    const raw = lines.map((l) => l.split(/[\t,;]+/).map((s) => s.trim()));
+    const first = raw[0][0];
+    let names = [];
+    let matrix = [];
+    if (!Number.isFinite(Number(first))) {
+      for (const row of raw) {
+        names.push(String(row[0]));
+        const nums = row.slice(1).map((s) => Number(s));
+        if (nums.some((n) => !Number.isFinite(n))) return { error: "Replicate matrix: all replicate cells must be numeric." };
+        matrix.push(nums);
+      }
+    } else {
+      matrix = raw.map((row) => row.map((s) => Number(s)));
+      if (matrix.some((r) => r.some((n) => !Number.isFinite(n)))) return { error: "Replicate matrix: invalid number." };
+      names = matrix.map((_, i) => `T${i + 1}`);
+    }
+    const r = matrix[0].length;
+    if (r < 2) return { error: "ANOVA block needs at least 2 replications per treatment." };
+    if (matrix.some((row) => row.length !== r)) return { error: "Each treatment row must have the same number of replicates." };
+    return { names, matrix, r };
+  }
+
+  function traitSummaryStats(vals, label) {
+    const n = vals.length;
+    const m = mean(vals);
+    if (n < 2) return null;
+    let ss = 0;
+    for (const v of vals) ss += (v - m) ** 2;
+    const sd = Math.sqrt(ss / (n - 1));
+    const se = sd / Math.sqrt(n);
+    const cv = Math.abs(m) > 1e-12 ? (sd / Math.abs(m)) * 100 : 0;
+    const df = n - 1;
+    const cd5 = studentTInvTwoTail(df, 0.05) * se * Math.sqrt(2);
+    const cd1 = studentTInvTwoTail(df, 0.01) * se * Math.sqrt(2);
+    return { trait: label, mean: m, se, cv, cd5, cd1, n, sd };
+  }
+
+  function corrHeatmapHtml(R, names) {
+    const p = R.length;
+    const cells = [];
+    for (let i = 0; i < p; i++) {
+      const row = [`<th>${qs(names[i])}</th>`];
+      for (let j = 0; j < p; j++) {
+        const r = R[i][j];
+        const t = (r + 1) / 2;
+        const bg =
+          r >= 0
+            ? `rgba(6, 78, 59, ${0.2 + Math.abs(r) * 0.65})`
+            : `rgba(225, 29, 72, ${0.2 + Math.abs(r) * 0.65})`;
+        row.push(`<td class="hm-cell" style="background:${bg}">${r.toFixed(3)}</td>`);
+      }
+      cells.push(`<tr>${row.join("")}</tr>`);
+    }
+    const head = `<tr><th></th>${names.map((n) => `<th>${qs(n)}</th>`).join("")}</tr>`;
+    return `<div class="corr-heatmap-wrap"><table class="corr-heatmap data"><thead>${head}</thead><tbody>${cells.join("")}</tbody></table></div>`;
+  }
+
+  function renderBiometricReport() {
+    const title = "Biometric Report (Summary, Correlation, Graphics)";
+    showContentHeader({
+      title,
+      subtitle:
+        "Paste genotype × trait data (unreplicated means). Optional: CRD-style treatment × replicate matrix for pooled ANOVA on one response.",
+    });
+
+    const defaultMulti = `Genotype,Yield_g,Protein_pct,Height_cm
+G1,32.1,12.4,102
+G2,34.2,11.8,105
+G3,31.5,12.1,100
+G4,33.0,12.0,104
+G5,30.8,11.9,99`;
+
+    const defaultCrd = `G1,31.2,32.1,31.8
+G2,33.1,34.0,33.5
+G3,30.5,29.9,30.2
+G4,32.8,33.2,32.9`;
+
+    const bodyHtml = `
+      <div class="two-col">
+        <div>
+          <div class="section" style="margin:0">
+            <h4>1. Genotype × trait matrix</h4>
+            <p class="muted small">Rows = entries (genotypes); columns = traits. First column may be labels (e.g. G1), or omit labels and use numbers only.</p>
+            <label>
+              Data
+              <textarea id="bioMulti" rows="10">${defaultMulti}</textarea>
+            </label>
+            <h4 style="margin-top:14px">2. Optional — CRD replicates (one response)</h4>
+            <p class="muted small">Rows = treatments; columns = replicates (equal r). First column may be labels. Used for one-way ANOVA on the <b>first trait</b> column above (matched by row order) — or leave default as separate yield trial.</p>
+            <label>
+              Treatment × replicate (optional)
+              <textarea id="bioCrd" rows="6">${defaultCrd}</textarea>
+            </label>
+            <div class="actions" style="margin-top:12px">
+              <button class="action-btn primary2" type="button" id="bioCompute">Run biometric analysis</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="section" style="margin:0">
+            <h4>Outputs</h4>
+            <div id="bioOutSummary"></div>
+            <div id="bioOutCorr"></div>
+            <div id="bioPlotBar" class="plotly-chart" style="margin-top:12px"></div>
+            <div id="bioPlotBox" class="plotly-chart" style="margin-top:12px"></div>
+            <div id="bioPlotScatter" class="plotly-chart" style="margin-top:12px"></div>
+            <div id="bioOutAnova"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "biometric",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: ["fAnova"],
+    });
+
+    function purgeBioPlots() {
+      ["bioPlotBar", "bioPlotBox", "bioPlotScatter"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el && typeof Plotly !== "undefined" && Plotly.purge) Plotly.purge(el);
+      });
+    }
+
+    $("#bioCompute").addEventListener("click", () => {
+      clearValidation("#contentBody");
+      purgeBioPlots();
+      const parsed = parseBiometricTraitMatrix($("#bioMulti").value);
+      if (parsed.error) {
+        markInvalidInput($("#bioMulti"), parsed.error);
+        $("#bioOutSummary").innerHTML = `<div class="note">${qs(parsed.error)}</div>`;
+        $("#bioOutCorr").innerHTML = "";
+        $("#bioOutAnova").innerHTML = "";
+        return;
+      }
+      const { rowNames, colNames, data } = parsed;
+      const p = colNames.length;
+      const n = data.length;
+
+      const summaryRows = [];
+      for (let j = 0; j < p; j++) {
+        const col = data.map((row) => row[j]);
+        const s = traitSummaryStats(col, colNames[j]);
+        if (s) summaryRows.push([s.trait, s.mean, s.se, s.cv, s.cd5, s.cd1]);
+      }
+      const sumTable = buildTable(
+        ["Trait / variable", "Mean", "Std. error", "CV (%)", "CD (5%)", "CD (1%)"],
+        summaryRows
+      );
+      $("#bioOutSummary").innerHTML = `<h4>Table 1. Summary statistics (across ${n} entries)</h4><p class="muted small">SE = SD/√n. CD uses two-mean comparison: t<sub>α/2,df</sub> × SE × √2 (df = n−1 per trait). For design-specific CD, use CRD/RBD modules with error MS.</p>${sumTable}`;
+
+      const X = data;
+      const R = pearsonCorrelationMatrix(X);
+      $("#bioOutCorr").innerHTML = `<h4 style="margin-top:14px">Table 2. Pearson correlation matrix</h4>${corrHeatmapHtml(R, colNames)}`;
+
+      const traitIdxBar = 0;
+      const ys = data.map((row) => row[traitIdxBar]);
+      const err = Array(n).fill(summaryRows[traitIdxBar] ? summaryRows[traitIdxBar][2] : 0);
+
+      if (typeof Plotly !== "undefined") {
+        Plotly.newPlot(
+          "bioPlotBar",
+          [
+            {
+              type: "bar",
+              x: rowNames,
+              y: ys,
+              error_y: { type: "data", array: err, visible: true, color: "#64748b", thickness: 1.2 },
+              marker: { color: "rgba(6, 78, 59, 0.82)" },
+              name: colNames[traitIdxBar],
+            },
+          ],
+          {
+            title: `Mean comparison — ${colNames[traitIdxBar]} (± SE across entries)`,
+            paper_bgcolor: "#ffffff",
+            plot_bgcolor: "#f8fafc",
+            font: { color: "#1e293b", family: "Segoe UI, system-ui, sans-serif" },
+            margin: { t: 48, b: 56 },
+            yaxis: { title: colNames[traitIdxBar], zeroline: true },
+            xaxis: { title: "Entry", tickangle: -25 },
+          },
+          { responsive: true, displayModeBar: false }
+        );
+
+        const boxTraces = colNames.map((name, j) => ({
+          type: "box",
+          y: data.map((row) => row[j]),
+          name,
+          marker: { color: `hsl(${160 + j * 18}, 45%, 42%)` },
+          boxmean: "sd",
+        }));
+        Plotly.newPlot(
+          "bioPlotBox",
+          boxTraces,
+          {
+            title: "Trait distributions across entries (box: quartiles + whiskers)",
+            paper_bgcolor: "#ffffff",
+            plot_bgcolor: "#f8fafc",
+            font: { color: "#1e293b" },
+            yaxis: { title: "Value" },
+            xaxis: { title: "Trait" },
+            showlegend: false,
+            margin: { t: 48, b: 48 },
+          },
+          { responsive: true, displayModeBar: false }
+        );
+
+        const xCol = data.map((row) => row[0]);
+        const yCol = data.map((row) => row[1]);
+        const { slope, intercept, r, r2 } = simpleLinearRegression(xCol, yCol);
+        const minX = Math.min(...xCol);
+        const maxX = Math.max(...xCol);
+        const lineX = [minX, maxX];
+        const lineY = [intercept + slope * minX, intercept + slope * maxX];
+        Plotly.newPlot(
+          "bioPlotScatter",
+          [
+            {
+              type: "scatter",
+              mode: "markers",
+              x: xCol,
+              y: yCol,
+              text: rowNames,
+              marker: { size: 10, color: "rgba(6, 78, 59, 0.85)" },
+              name: "Obs",
+            },
+            {
+              type: "scatter",
+              mode: "lines",
+              x: lineX,
+              y: lineY,
+              line: { color: "#e11d48", width: 2 },
+              name: "OLS fit",
+            },
+          ],
+          {
+            title: `Regression / path-style trend: ${colNames[1]} vs ${colNames[0]} (R² = ${r2.toFixed(4)})`,
+            paper_bgcolor: "#ffffff",
+            plot_bgcolor: "#f8fafc",
+            font: { color: "#1e293b" },
+            xaxis: { title: colNames[0] },
+            yaxis: { title: colNames[1] },
+            margin: { t: 48 },
+            annotations: [
+              {
+                x: maxX,
+                y: lineY[1],
+                text: `y = ${intercept.toFixed(3)} + ${slope.toFixed(3)}x`,
+                showarrow: false,
+                xanchor: "right",
+                font: { size: 11 },
+              },
+            ],
+          },
+          { responsive: true, displayModeBar: false }
+        );
+      } else {
+        $("#bioPlotBar").innerHTML = `<p class="muted small">Plotly failed to load — check network for CDN.</p>`;
+      }
+
+      const crdP = parseCrdRepMatrix($("#bioCrd").value);
+      let anovaBlock = "";
+      if (crdP.error) {
+        anovaBlock = `<div class="note" style="margin-top:12px">${qs(crdP.error)}</div>`;
+      } else if (crdP.matrix && !crdP.skip) {
+        const out = crdAnova(crdP.matrix, crdP.r);
+        const means = out.means.map((m) => m.mean);
+        const order = out.means.map((_, i) => i).sort((a, b) => means[b] - means[a]);
+        const top = order.slice(0, Math.min(3, order.length)).map((i) => `${crdP.names[i]} (mean=${means[i].toFixed(3)})`);
+        const sig = out.sig.note;
+        anovaBlock = `
+          <h4 style="margin-top:16px">Table 3. One-way ANOVA (CRD on replicate matrix)</h4>
+          ${buildTable(
+            ["Source", "SS", "df", "MS", "F", "Sig. (approx.)"],
+            [
+              ["Treatments", out.ssTreat, out.dfTreat, out.msTreat, out.fStat, out.sig.note],
+              ["Error", out.ssError, out.dfError, out.msError, "", ""],
+              ["Total", out.ssTotal, out.dfTreat + out.dfError, "", "", ""],
+            ]
+          )}
+          <div class="section" style="margin-top:12px">
+            <h4>Statistical interpretation (ANOVA)</h4>
+            <p style="white-space:pre-wrap;color:var(--text);line-height:1.55">${qs(
+              `1) The F-test for treatments is F = ${out.fStat.toFixed(4)} on df1=${out.dfTreat}, df2=${out.dfError}, with approximate significance: ${sig}.\n` +
+                `2) Mean square error (MSE = ${out.msError.toFixed(4)}) estimates experimental error variance; treatment mean square (MST = ${out.msTreat.toFixed(4)}) measures among-treatment variation relative to that error.\n` +
+                `3) Under the usual CRD assumptions (independence, homogeneity of variance, additive errors), a large F relative to the critical ratio supports differences among treatment means; use mean comparisons (e.g. CD from error MS) for ranking entries.`
+            )}</p>
+            <p class="muted small" style="margin-top:10px"><b>Top-performing entries (by treatment mean):</b> ${qs(top.join("; "))}</p>
+          </div>`;
+      } else {
+        anovaBlock = `<p class="muted small" style="margin-top:12px">Optional ANOVA: paste a treatment × replicate matrix to append pooled one-way ANOVA.</p>`;
+      }
+      $("#bioOutAnova").innerHTML = anovaBlock;
+
+      const interpret =
+        `Biometric summary across ${n} entries and ${p} traits.\n` +
+        `Highest mean for ${colNames[0]}: ${rowNames[ys.indexOf(Math.max(...ys))]} (${Math.max(...ys).toFixed(3)}).\n` +
+        `Correlation between ${colNames[0]} and ${colNames[1]}: r = ${pearsonCorrelation(xCol, yCol).toFixed(4)}.`;
+
+      let fAnovaVal = 0;
+      if (crdP.matrix && crdP.r && !crdP.error) fAnovaVal = crdAnova(crdP.matrix, crdP.r).fStat;
+      setInterpretation("biometric", interpret, "", { fAnova: fAnovaVal });
+      setRunMeta("biometric", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `${n}×${p}`,
+        standardization: "none",
+        preprocessing: "Biometric report: summary, correlation heatmap, Plotly charts.",
+        qualityScore: "85 / 100",
+      });
+    });
+
+    $("#bioCompute").click();
+  }
+
+  // --- Data Insights (Tailwind + Chart.js: table, grouped bar + SE, correlation heatmap) ---
+  let diBarChartInstance = null;
+
+  function registerDiErrorBarPluginOnce() {
+    if (typeof Chart === "undefined" || window.__bkqDiErrorBarsRegistered) return;
+    Chart.register({
+      id: "diErrorBars",
+      afterDatasetsDraw(chart) {
+        const ctx = chart.ctx;
+        chart.data.datasets.forEach((dataset, dsIndex) => {
+          const errs = dataset.errorBarY;
+          if (!errs || !errs.length) return;
+          const meta = chart.getDatasetMeta(dsIndex);
+          if (!meta.data) return;
+          ctx.save();
+          ctx.strokeStyle = "rgba(226, 232, 240, 0.75)";
+          ctx.lineWidth = 1;
+          meta.data.forEach((bar, i) => {
+            const se = errs[i];
+            if (!Number.isFinite(se) || se <= 0) return;
+            const v = dataset.data[i];
+            const yScale = chart.scales.y;
+            const y0 = yScale.getPixelForValue(v - se);
+            const y1 = yScale.getPixelForValue(v + se);
+            const x = bar.x;
+            ctx.beginPath();
+            ctx.moveTo(x, y0);
+            ctx.lineTo(x, y1);
+            ctx.stroke();
+            const cap = 3;
+            ctx.beginPath();
+            ctx.moveTo(x - cap, y0);
+            ctx.lineTo(x + cap, y0);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x - cap, y1);
+            ctx.lineTo(x + cap, y1);
+            ctx.stroke();
+          });
+          ctx.restore();
+        });
+      },
+    });
+    window.__bkqDiErrorBarsRegistered = true;
+  }
+
+  function renderDataInsights() {
+    const title = "Data Insights";
+    showContentHeader({
+      title,
+      subtitle:
+        "Searchable summary table, grouped bar chart with ±SE error bars, and Pearson correlation heatmap (slate / indigo). Paste genotype × trait data (CSV).",
+    });
+
+    const defaultCsv = `Genotype,Yield,Protein,Oil
+G1,32.1,12.4,42.0
+G2,34.2,11.8,41.2
+G3,31.5,12.1,40.5
+G4,33.0,12.0,41.8
+G5,30.8,11.9,40.1`;
+
+    function sdSample(arr) {
+      const n = arr.length;
+      if (n < 2) return 0;
+      const m = mean(arr);
+      let ss = 0;
+      for (const v of arr) ss += (v - m) ** 2;
+      return Math.sqrt(ss / (n - 1));
+    }
+
+    function traitCvAcrossGenotypes(col) {
+      const vals = col.slice();
+      const m = mean(vals);
+      const sd = sdSample(vals);
+      return Math.abs(m) > 1e-12 ? (sd / Math.abs(m)) * 100 : 0;
+    }
+
+    function diHeatmapHtml(R, names) {
+      const p = R.length;
+      const rows = [];
+      for (let i = 0; i < p; i++) {
+        const tds = [`<th class="border border-slate-700 bg-slate-900 px-2 py-1.5 text-left text-xs font-semibold text-slate-200">${qs(names[i])}</th>`];
+        for (let j = 0; j < p; j++) {
+          const r = R[i][j];
+          const t = (r + 1) / 2;
+          const r0 = 220;
+          const g0 = 38;
+          const b0 = 38;
+          const r1 = 16;
+          const g1 = 185;
+          const b1 = 129;
+          const rr = Math.round(r0 + (r1 - r0) * t);
+          const gg = Math.round(g0 + (g1 - g0) * t);
+          const bb = Math.round(b0 + (b1 - b0) * t);
+          tds.push(
+            `<td class="border border-slate-700 px-1.5 py-1 text-center text-xs font-mono text-slate-900" style="background:rgba(${rr},${gg},${bb},0.72)">${r.toFixed(3)}</td>`
+          );
+        }
+        rows.push(`<tr class="hover:bg-slate-800/40">${tds.join("")}</tr>`);
+      }
+      const head = `<tr><th class="sticky left-0 z-20 border border-slate-700 bg-slate-900 px-2 py-2"></th>${names
+        .map((n) => `<th class="border border-slate-700 bg-slate-900 px-2 py-2 text-xs font-semibold text-indigo-300">${qs(n)}</th>`)
+        .join("")}</tr>`;
+      return `<div class="overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/40 shadow-inner"><table class="w-full border-collapse">${head}<tbody>${rows.join("")}</tbody></table></div><p class="mt-2 text-xs text-slate-400">Scale: red (−1) → green (+1). Diagonal = 1.</p>`;
+    }
+
+    const bodyHtml = `
+      <div class="rounded-xl border border-slate-700 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-4 text-slate-100 shadow-xl">
+        <div class="mb-4 rounded-lg border border-indigo-500/30 bg-slate-900/80 p-4 shadow-md">
+          <h4 class="mb-2 text-sm font-bold uppercase tracking-wide text-indigo-300">Summary</h4>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="rounded-md border border-slate-600/60 bg-slate-800/50 p-3">
+              <div class="text-xs font-medium text-slate-400">Mean CV% (across traits)</div>
+              <div id="diCvVal" class="mt-1 text-2xl font-bold text-emerald-400">—</div>
+            </div>
+            <div class="rounded-md border border-slate-600/60 bg-slate-800/50 p-3">
+              <div class="text-xs font-medium text-slate-400">Top performer (by row mean)</div>
+              <div id="diTopVal" class="mt-1 text-xl font-bold text-indigo-300">—</div>
+            </div>
+          </div>
+          <p class="mt-3 text-xs leading-relaxed text-slate-400">
+            <strong class="text-slate-300">Practice:</strong> publish means with CD and CV so readers can judge real differences vs. noise.
+            Use scatter + trend for path-style relationships; use box plots when you have replicates to show spread and outliers.
+          </p>
+        </div>
+
+        <label class="mb-2 block text-sm font-medium text-slate-300">Data (CSV: header row, first column = genotype/sample)</label>
+        <textarea id="diCsv" class="mb-3 w-full rounded-lg border border-slate-600 bg-slate-950/80 p-3 font-mono text-sm text-slate-100" rows="8">${qs(defaultCsv)}</textarea>
+        <div class="mb-4 flex flex-wrap gap-2">
+          <button type="button" id="diCompute" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-indigo-500">Update insights</button>
+          <input id="diSearch" type="search" placeholder="Search genotype…" class="min-w-[200px] flex-1 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500" />
+        </div>
+
+        <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+          <div class="min-w-0">
+            <h4 class="mb-2 text-sm font-semibold text-indigo-200">Performance table</h4>
+            <div class="max-h-[min(520px,70vh)] overflow-auto rounded-lg border border-slate-700">
+              <table id="diTable" class="w-full border-collapse text-sm">
+                <thead class="sticky top-0 z-10 bg-slate-900 shadow-[0_1px_0_0_rgba(51,65,85,0.9)]">
+                  <tr>
+                    <th data-sort="name" class="cursor-pointer border-b border-slate-600 px-3 py-2.5 text-left text-xs font-bold uppercase tracking-wide text-indigo-300">Genotype / Sample</th>
+                    <th data-sort="mean" class="cursor-pointer border-b border-slate-600 px-3 py-2.5 text-right text-xs font-bold uppercase tracking-wide text-indigo-300">Mean performance</th>
+                    <th data-sort="se" class="cursor-pointer border-b border-slate-600 px-3 py-2.5 text-right text-xs font-bold uppercase tracking-wide text-indigo-300">SEm ±</th>
+                    <th data-sort="cd" class="cursor-pointer border-b border-slate-600 px-3 py-2.5 text-right text-xs font-bold uppercase tracking-wide text-indigo-300">CD @ 5%</th>
+                  </tr>
+                </thead>
+                <tbody id="diTbody"></tbody>
+              </table>
+            </div>
+            <div id="diFooter" class="mt-2 rounded border border-slate-700 bg-slate-900/60 p-2 text-xs text-slate-400"></div>
+          </div>
+
+          <div class="flex min-w-0 flex-col gap-6">
+            <div>
+              <h4 class="mb-2 text-sm font-semibold text-indigo-200">Grouped bar — traits by genotype (± SE)</h4>
+              <p class="mb-1 text-xs text-slate-500">SE per bar = SD of that trait across genotypes / √n (screening SE).</p>
+              <div class="relative h-72 w-full rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+                <canvas id="diChartBar"></canvas>
+              </div>
+            </div>
+            <div>
+              <h4 class="mb-2 text-sm font-semibold text-indigo-200">Pearson correlation heatmap</h4>
+              <div id="diHeatWrap"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    moduleShell({
+      moduleId: "dataInsights",
+      title,
+      subtitle: "",
+      bodyHtml,
+      payloadForPrevComparison: { interpretation: "", storePrev: null },
+      prevCompareKeys: [],
+    });
+
+    let tableRows = [];
+    let sortKey = "name";
+    let sortDir = 1;
+
+    function computeAndRender() {
+      const parsed = parseBiometricTraitMatrix($("#diCsv").value);
+      if (parsed.error) {
+        $("#diTbody").innerHTML = `<tr><td colspan="4" class="px-3 py-4 text-rose-400">${qs(parsed.error)}</td></tr>`;
+        $("#diFooter").innerHTML = "";
+        $("#diHeatWrap").innerHTML = "";
+        $("#diCvVal").textContent = "—";
+        $("#diTopVal").textContent = "—";
+        if (diBarChartInstance && typeof Chart !== "undefined") {
+          diBarChartInstance.destroy();
+          diBarChartInstance = null;
+        }
+        return;
+      }
+      const { rowNames, colNames, data } = parsed;
+      const n = data.length;
+      const p = colNames.length;
+
+      const traitCvs = colNames.map((_, j) => traitCvAcrossGenotypes(data.map((row) => row[j])));
+      const meanCv = mean(traitCvs);
+      $("#diCvVal").textContent = `${meanCv.toFixed(2)}%`;
+
+      const rowStats = rowNames.map((name, i) => {
+        const vals = data[i];
+        const m = mean(vals);
+        const se = p > 1 ? sdSample(vals) / Math.sqrt(p) : 0;
+        return { name, mean: m, se, vals };
+      });
+      const top = rowStats.reduce((a, b) => (a.mean >= b.mean ? a : b));
+      $("#diTopVal").textContent = `${top.name} (${top.mean.toFixed(3)})`;
+
+      const seMean = mean(rowStats.map((r) => r.se));
+      const df = Math.max(1, n - 1);
+      const cd5 = studentTInvTwoTail(df, 0.05) * seMean * Math.sqrt(2);
+
+      tableRows = rowStats.map((r) => ({
+        name: r.name,
+        mean: r.mean,
+        se: r.se,
+        cd: cd5,
+      }));
+
+      $("#diFooter").innerHTML = `<strong class="text-slate-300">Pooled CD (5%)</strong> for comparing row means (composite): ${cd5.toFixed(4)}. <strong>CV traits</strong> (mean): ${meanCv.toFixed(2)}%.`;
+
+      renderTableBody();
+      bindSort();
+
+      const R = pearsonCorrelationMatrix(data);
+      $("#diHeatWrap").innerHTML = diHeatmapHtml(R, colNames);
+
+      if (typeof Chart === "undefined") return;
+
+      const canvas = $("#diChartBar");
+      if (!canvas) return;
+      if (diBarChartInstance) {
+        diBarChartInstance.destroy();
+        diBarChartInstance = null;
+      }
+
+      const palette = ["rgba(99, 102, 241, 0.85)", "rgba(129, 140, 248, 0.85)", "rgba(165, 180, 252, 0.9)", "rgba(79, 70, 229, 0.85)", "rgba(196, 181, 253, 0.85)"];
+      const traitSes = colNames.map((_, j) => {
+        const col = data.map((row) => row[j]);
+        return n > 1 ? sdSample(col) / Math.sqrt(n) : 0;
+      });
+
+      const datasets = colNames.map((cn, j) => ({
+        label: cn,
+        data: data.map((row) => row[j]),
+        backgroundColor: palette[j % palette.length],
+        borderColor: "rgba(30, 27, 75, 0.9)",
+        borderWidth: 1,
+        errorBarY: traitSes,
+      }));
+
+      registerDiErrorBarPluginOnce();
+
+      diBarChartInstance = new Chart(canvas, {
+        type: "bar",
+        data: {
+          labels: rowNames,
+          datasets,
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: { color: "#cbd5e1", font: { size: 11 }, boxWidth: 12 },
+            },
+            title: { display: true, text: "Traits compared across samples", color: "#a5b4fc", font: { size: 13 } },
+            tooltip: {
+              backgroundColor: "rgba(15, 23, 42, 0.95)",
+              titleColor: "#f1f5f9",
+              bodyColor: "#e2e8f0",
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: "#94a3b8", maxRotation: 45, minRotation: 0 },
+              grid: { color: "rgba(51, 65, 85, 0.35)" },
+            },
+            y: {
+              beginAtZero: false,
+              ticks: { color: "#94a3b8" },
+              grid: { color: "rgba(51, 65, 85, 0.35)" },
+            },
+          },
+        },
+      });
+
+      setInterpretation(
+        "dataInsights",
+        `Data Insights: mean CV across traits ${meanCv.toFixed(2)}%; top entry ${top.name} (row mean ${top.mean.toFixed(4)}). Pooled CD (5%) for row-mean comparison ≈ ${cd5.toFixed(4)}. Correlation heatmap uses Pearson r between traits.`,
+        "",
+        null
+      );
+      setRunMeta("dataInsights", {
+        forceRun: isForceRunEnabled(),
+        inputSize: `${n} genotypes × ${p} traits`,
+        standardization: "none",
+        preprocessing: "Tailwind + Chart.js grouped bar + heatmap table.",
+        qualityScore: "90 / 100",
+      });
+    }
+
+    function renderTableBody() {
+      const q = ($("#diSearch").value || "").trim().toLowerCase();
+      let rows = tableRows.filter((r) => !q || String(r.name).toLowerCase().includes(q));
+      const sk = sortKey;
+      const dir = sortDir;
+      rows = [...rows].sort((a, b) => {
+        const va = sk === "name" ? String(a.name).toLowerCase() : Number(a[sk]);
+        const vb = sk === "name" ? String(b.name).toLowerCase() : Number(b[sk]);
+        if (va < vb) return -dir;
+        if (va > vb) return dir;
+        return 0;
+      });
+      $("#diTbody").innerHTML = rows
+        .map(
+          (r, i) =>
+            `<tr class="border-b border-slate-700/60 ${i % 2 === 0 ? "bg-slate-900/30" : "bg-indigo-950/25"}"><td class="px-3 py-2 font-medium text-slate-100">${qs(
+              r.name
+            )}</td><td class="px-3 py-2 text-right font-mono text-slate-200">${r.mean.toFixed(4)}</td><td class="px-3 py-2 text-right font-mono text-slate-300">± ${r.se.toFixed(
+              4
+            )}</td><td class="px-3 py-2 text-right font-mono text-indigo-200">${r.cd.toFixed(4)}</td></tr>`
+        )
+        .join("");
+    }
+
+    function bindSort() {
+      $$("#diTable thead th[data-sort]").forEach((th) => {
+        th.replaceWith(th.cloneNode(true));
+      });
+      $$("#diTable thead th[data-sort]").forEach((th) => {
+        th.addEventListener("click", () => {
+          const k = th.getAttribute("data-sort");
+          if (sortKey === k) sortDir *= -1;
+          else {
+            sortKey = k;
+            sortDir = k === "name" ? 1 : -1;
+          }
+          renderTableBody();
+        });
+      });
+    }
+
+    $("#diCompute").addEventListener("click", computeAndRender);
+    $("#diSearch").addEventListener("input", () => renderTableBody());
+    computeAndRender();
+  }
+
   // -----------------------------
   // Module registry
   // -----------------------------
   const GROUPS = {
     "data-analysis": [
+      { id: "dataInsights", title: "Data Insights", icon: "◈" },
       { id: "crd", title: "CRD (ANOVA)", icon: "⬚" },
       { id: "rbd", title: "RBD (ANOVA)", icon: "▤" },
       { id: "factorial", title: "Factorial RBD", icon: "⊞" },
@@ -8004,11 +8932,13 @@
       { id: "met", title: "MET", icon: "∑E" },
       { id: "ammi", title: "AMMI & Biplot", icon: "⌬" },
       { id: "pca", title: "PCA", icon: "◔" },
+      { id: "biometric", title: "Biometric Report", icon: "◫" },
     ],
   };
 
   function computeButtonForModule(moduleId) {
     const map = {
+      dataInsights: "diCompute",
       crd: "crdCompute",
       rbd: "rbdCompute",
       factorial: "factCompute",
@@ -8030,6 +8960,7 @@
       genmean: "gmCompute",
       met: "metCompute",
       ammi: "ammiCompute",
+      biometric: "bioCompute",
     };
     return map[moduleId] || "";
   }
@@ -8187,6 +9118,7 @@
     if (group) setActiveNav(group);
 
     // Render
+    if (id === "dataInsights") return renderDataInsights();
     if (id === "crd") return renderCRD();
     if (id === "rbd") return renderRBD();
     if (id === "factorial") return renderFactorial();
@@ -8208,6 +9140,7 @@
     if (id === "genmean") return renderGenerationMean();
     if (id === "met") return renderMET();
     if (id === "ammi") return renderAMMI();
+    if (id === "biometric") return renderBiometricReport();
 
     // Everything else: fully worked example output (tables + plots + interpretation).
     switch (id) {
@@ -8352,12 +9285,14 @@
     const form = $("#loginForm");
     const loginCard = $("#loginCard");
     const appCard = $("#appCard");
+    const homeChartsCard = $("#homeChartsCard");
 
     function setAuthed(yes) {
       if (yes) {
         localStorage.setItem(STORAGE_KEY, "1");
         loginCard.classList.add("hidden");
         appCard.classList.remove("hidden");
+        homeChartsCard?.classList.add("hidden");
         // default show data analysis
         setActiveNav("data-analysis");
         setSidebar(GROUPS["data-analysis"]);
@@ -8368,6 +9303,7 @@
         localStorage.removeItem(STORAGE_KEY);
         loginCard.classList.remove("hidden");
         appCard.classList.add("hidden");
+        homeChartsCard?.classList.remove("hidden");
       }
     }
 

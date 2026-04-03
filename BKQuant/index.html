@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>BKQuant</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        corePlugins: { preflight: false },
+        theme: {
+          extend: {
+            colors: {
+              slate: { 950: "#020617", 900: "#0f172a", 800: "#1e293b", 700: "#334155", 200: "#e2e8f0" },
+              indigo: { 400: "#818cf8", 500: "#6366f1", 600: "#4f46e5", 900: "#312e81" },
+            },
+          },
+        },
+      };
+    </script>
   </head>
   <body>
     <header class="site-header">
@@ -43,10 +57,31 @@
     <main class="shell">
       <section class="card card--brand">
         <p class="brand-quote">
-          “Dreams and seeds share one law: measure, learn, and improve.”
+          “Silence isn’t empty; it’s full of answers.”
         </p>
         <p class="help-tag">
           Ask <b>BKQuant Professor</b> to explore statistical concepts used in these tools.
+        </p>
+      </section>
+
+      <section class="card" id="homeChartsCard" aria-labelledby="homeChartsHeading">
+        <h2 id="homeChartsHeading">Interactive charts (Chart.js)</h2>
+        <p class="muted small">
+          <strong>Data input:</strong> Use a clear structure before you run analyses—CSV, Excel (export to CSV when needed), or a tidy Markdown table with one row per genotype and consistent column names.
+        </p>
+        <p class="muted small" style="margin-top:8px">
+          <strong>Accuracy:</strong> BKQuant computes statistics in your browser; still double-check critical values such as <em>p</em>-values and mean ± SEm (standard error of the mean) when copying into reports—transcription errors are easy even with AI assistance.
+        </p>
+        <div class="home-charts-grid">
+          <div class="home-chart-wrap">
+            <canvas id="homeChartBar" aria-label="Demo bar chart: mean yield by genotype"></canvas>
+          </div>
+          <div class="home-chart-wrap">
+            <canvas id="homeChartLine" aria-label="Demo line chart: trend across traits"></canvas>
+          </div>
+        </div>
+        <p class="muted small" style="margin-top:10px">
+          Hover or tap for tooltips. Module views (e.g. Biometric Report) may use Plotly or canvas for heavy plots; this homepage uses Chart.js for lightweight, interactive demos.
         </p>
       </section>
 
@@ -148,6 +183,103 @@
       </div>
     </footer>
 
+    <script src="https://cdn.jsdelivr.net/npm/jstat@1.9.6/dist/jstat.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script>
+      (function () {
+        if (typeof Chart === "undefined") return;
+        const emerald = "rgba(16, 185, 129, 0.75)";
+        const emeraldBorder = "rgba(6, 95, 70, 0.95)";
+        const slate = "rgba(100, 116, 139, 0.85)";
+        const commonOpts = {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { labels: { color: "#e2e8f0" } },
+            tooltip: {
+              backgroundColor: "rgba(15, 23, 42, 0.92)",
+              titleColor: "#f8fafc",
+              bodyColor: "#e2e8f0",
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: "#94a3b8" },
+              grid: { color: "rgba(148, 163, 184, 0.15)" },
+            },
+            y: {
+              ticks: { color: "#94a3b8" },
+              grid: { color: "rgba(148, 163, 184, 0.15)" },
+            },
+          },
+        };
+        const barEl = document.getElementById("homeChartBar");
+        const lineEl = document.getElementById("homeChartLine");
+        if (barEl) {
+          new Chart(barEl.getContext("2d"), {
+            type: "bar",
+            data: {
+              labels: ["G1", "G2", "G3", "G4", "G5"],
+              datasets: [
+                {
+                  label: "Mean yield (demo, t/ha)",
+                  data: [32.1, 34.2, 31.5, 33.0, 30.8],
+                  backgroundColor: emerald,
+                  borderColor: emeraldBorder,
+                  borderWidth: 1,
+                },
+              ],
+            },
+            options: {
+              ...commonOpts,
+              plugins: {
+                ...commonOpts.plugins,
+                title: {
+                  display: true,
+                  text: "Example: genotype means (interactive)",
+                  color: "#cbd5e1",
+                  font: { size: 13 },
+                },
+              },
+            },
+          });
+        }
+        if (lineEl) {
+          new Chart(lineEl.getContext("2d"), {
+            type: "line",
+            data: {
+              labels: ["T1", "T2", "T3", "T4"],
+              datasets: [
+                {
+                  label: "Trait profile (demo)",
+                  data: [12.4, 11.8, 12.1, 11.9],
+                  borderColor: slate,
+                  backgroundColor: "rgba(100, 116, 139, 0.2)",
+                  fill: true,
+                  tension: 0.25,
+                  pointRadius: 4,
+                  pointHoverRadius: 6,
+                },
+              ],
+            },
+            options: {
+              ...commonOpts,
+              plugins: {
+                ...commonOpts.plugins,
+                title: {
+                  display: true,
+                  text: "Example: line trend (interactive)",
+                  color: "#cbd5e1",
+                  font: { size: 13 },
+                },
+              },
+            },
+          });
+        }
+      })();
+    </script>
     <script src="app.js"></script>
   </body>
 </html>
