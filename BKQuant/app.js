@@ -242,20 +242,23 @@
   }
 
   // -----------------------------
-  // Minimal chart drawing helpers (colors tuned for light UI)
+  // Publication-grade chart drawing helpers
   // -----------------------------
   const CHART = {
-    bg: "#f8fafc",
-    ink: "#0f172a",
-    inkMuted: "#475569",
-    grid: "rgba(15, 23, 42, 0.1)",
-    bar0: "#0d9488",
-    bar1: "#2563eb",
-    point: "#0d9488",
-    pointStroke: "#0f766e",
-    lineFit: "#c2410c",
-    lineAlt: "#2563eb",
+    bg: "#ffffff",
+    ink: "#0b1220",
+    inkMuted: "#344256",
+    frame: "rgba(15, 23, 42, 0.2)",
+    grid: "rgba(15, 23, 42, 0.12)",
+    axis: "#1e293b",
+    bar0: "#1d4ed8",
+    bar1: "#0f766e",
+    point: "#1d4ed8",
+    pointStroke: "#ffffff",
+    lineFit: "#b91c1c",
+    lineAlt: "#0f766e",
     accentAmber: "#d97706",
+    pointPalette: ["#1d4ed8", "#059669", "#dc2626", "#7c3aed", "#ea580c", "#0f766e", "#be123c"],
   };
 
   function setupCanvas(canvas) {
@@ -281,17 +284,54 @@
     return n.toFixed(3);
   }
 
+  function niceNum(range, round) {
+    const exponent = Math.floor(Math.log10(Math.max(1e-12, range)));
+    const fraction = range / 10 ** exponent;
+    let niceFraction;
+    if (round) {
+      if (fraction < 1.5) niceFraction = 1;
+      else if (fraction < 3) niceFraction = 2;
+      else if (fraction < 7) niceFraction = 5;
+      else niceFraction = 10;
+    } else {
+      if (fraction <= 1) niceFraction = 1;
+      else if (fraction <= 2) niceFraction = 2;
+      else if (fraction <= 5) niceFraction = 5;
+      else niceFraction = 10;
+    }
+    return niceFraction * 10 ** exponent;
+  }
+
+  function niceScale(min, max, ticks = 6) {
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 1, step: 0.2 };
+    if (Math.abs(max - min) <= 1e-12) {
+      const c = min;
+      const step = Math.max(1e-6, Math.abs(c) * 0.1 || 1);
+      return { min: c - 2 * step, max: c + 2 * step, step };
+    }
+    const rawRange = max - min;
+    const niceRange = niceNum(rawRange, false);
+    const step = niceNum(niceRange / Math.max(2, ticks - 1), true);
+    const niceMin = Math.floor(min / step) * step;
+    const niceMax = Math.ceil(max / step) * step;
+    return { min: niceMin, max: niceMax, step };
+  }
+
   function drawBarChart(canvas, labels, values, { title } = {}) {
     const { ctx, w, h } = setupCanvas(canvas);
-    const padL = 52;
+    const padL = 62;
     const padR = 18;
-    const padT = title ? 32 : 22;
-    const padB = 56;
+    const padT = title ? 38 : 24;
+    const padB = 62;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
-    const max = Math.max(1e-9, ...values);
-    const min = 0;
-    const grid = 5;
+    const dMin = Math.min(...values, 0);
+    const dMax = Math.max(...values);
+    const sc = niceScale(dMin, dMax, 6);
+    const min = sc.min;
+    const max = sc.max;
+    const step = sc.step;
+    const grid = Math.max(2, Math.round((max - min) / step));
     const plotTop = padT;
     const plotBottom = padT + plotH;
     const scaleY = plotH / (max - min);
@@ -302,13 +342,13 @@
     ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
 
-    ctx.strokeStyle = "rgba(15, 23, 42, 0.14)";
+    ctx.strokeStyle = CHART.frame;
     ctx.lineWidth = 1;
     ctx.strokeRect(padL + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, system-ui, sans-serif";
+      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
@@ -324,14 +364,14 @@
       ctx.stroke();
       const val = min + (max - min) * t;
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+      ctx.font = "600 12px Segoe UI, Arial, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       ctx.fillText(formatChartTick(val), padL - 8, y);
     }
 
-    ctx.strokeStyle = "#94a3b8";
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = CHART.axis;
+    ctx.lineWidth = 1.7;
     ctx.beginPath();
     ctx.moveTo(padL, plotBottom);
     ctx.lineTo(padL + plotW, plotBottom);
@@ -344,7 +384,7 @@
       const bh = (v - min) * scaleY;
       const y = plotBottom - bh;
 
-      const grad = ctx.createLinearGradient(0, y, 0, plotBottom);
+      const grad = ctx.createLinearGradient(x, y, x + barW, plotBottom);
       grad.addColorStop(0, CHART.bar0);
       grad.addColorStop(1, CHART.bar1);
       ctx.fillStyle = grad;
@@ -354,9 +394,9 @@
       ctx.fill();
       ctx.stroke();
 
-      if (bh > 16) {
+      if (bh > 18) {
         ctx.fillStyle = "#fff";
-        ctx.font = "700 11px Segoe UI, system-ui, sans-serif";
+        ctx.font = "700 11px Segoe UI, Arial, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         ctx.fillText(formatChartTick(v), cx, y - 4);
@@ -364,13 +404,13 @@
 
       const lbl = String(labels[i] ?? "");
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 11px Segoe UI, system-ui, sans-serif";
+      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.save();
       ctx.translate(cx, plotBottom + 10);
-      ctx.rotate(-Math.PI / 7);
-      ctx.fillText(lbl.length > 12 ? lbl.slice(0, 11) + "…" : lbl, 0, 0);
+      ctx.rotate(-Math.PI / 9);
+      ctx.fillText(lbl.length > 18 ? lbl.slice(0, 17) + "…" : lbl, 0, 0);
       ctx.restore();
     }
   }
@@ -388,16 +428,18 @@
 
   function drawScatterPlot(canvas, points, { title, xLabel, yLabel } = {}) {
     const { ctx, w, h } = setupCanvas(canvas);
-    const padL = 54;
+    const padL = 62;
     const padR = 22;
-    const padT = title ? 34 : 24;
-    const padB = 44;
+    const padT = title ? 38 : 24;
+    const padB = 52;
     const xs = points.map((p) => p.x);
     const ys = points.map((p) => p.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
+    const sx = niceScale(Math.min(...xs), Math.max(...xs), 6);
+    const sy = niceScale(Math.min(...ys), Math.max(...ys), 6);
+    const minX = sx.min;
+    const maxX = sx.max;
+    const minY = sy.min;
+    const maxY = sy.max;
     const rangeX = Math.max(1e-9, maxX - minX);
     const rangeY = Math.max(1e-9, maxY - minY);
     const plotW = w - padL - padR;
@@ -414,16 +456,16 @@
 
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, system-ui, sans-serif";
+      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
 
-    ctx.strokeStyle = "rgba(15, 23, 42, 0.14)";
+    ctx.strokeStyle = CHART.frame;
     ctx.lineWidth = 1;
     ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
-    const grid = 5;
+    const grid = 6;
     for (let i = 0; i <= grid; i++) {
       const t = i / grid;
       const y = plotBottom - t * plotH;
@@ -434,7 +476,7 @@
       ctx.stroke();
       const val = minY + (maxY - minY) * t;
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+      ctx.font = "600 12px Segoe UI, Arial, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       ctx.fillText(formatChartTick(val), plotLeft - 8, y);
@@ -449,14 +491,14 @@
       ctx.stroke();
       const val = minX + (maxX - minX) * t;
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 11px Segoe UI, system-ui, sans-serif";
+      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillText(formatChartTick(val), x, plotBottom + 6);
     }
 
-    ctx.strokeStyle = "#94a3b8";
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = CHART.axis;
+    ctx.lineWidth = 1.7;
     ctx.beginPath();
     ctx.moveTo(plotLeft, plotBottom);
     ctx.lineTo(plotRight, plotBottom);
@@ -464,25 +506,26 @@
     ctx.lineTo(plotLeft, plotBottom);
     ctx.stroke();
 
-    points.forEach((p) => {
+    points.forEach((p, idx) => {
       const px = gx(p.x);
       const py = gy(p.y);
-      ctx.fillStyle = CHART.point;
-      ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 2;
+      const cIdx = Number.isFinite(p.c) ? Math.abs(p.c) : idx;
+      ctx.fillStyle = CHART.pointPalette[cIdx % CHART.pointPalette.length] || CHART.point;
+      ctx.strokeStyle = CHART.pointStroke;
+      ctx.lineWidth = 1.8;
       ctx.beginPath();
-      ctx.arc(px, py, 5.2, 0, Math.PI * 2);
+      ctx.arc(px, py, 4.8, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
-      ctx.strokeStyle = CHART.pointStroke;
-      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.45)";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(px, py, 5.2, 0, Math.PI * 2);
+      ctx.arc(px, py, 4.8, 0, Math.PI * 2);
       ctx.stroke();
     });
 
     ctx.fillStyle = CHART.inkMuted;
-    ctx.font = "600 12px Segoe UI, system-ui, sans-serif";
+    ctx.font = "600 12px Segoe UI, Arial, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillText(xLabel || "", (plotLeft + plotRight) / 2, h - 18);
@@ -497,10 +540,10 @@
 
   /** Matches drawScatterPlot layout so overlays (regression line, labels) align. */
   function scatterPlotGeo(w, h, withTitle) {
-    const padL = 54;
+    const padL = 62;
     const padR = 22;
-    const padT = withTitle ? 34 : 24;
-    const padB = 44;
+    const padT = withTitle ? 38 : 24;
+    const padB = 52;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
     const plotBottom = padT + plotH;
@@ -7530,7 +7573,9 @@
       const w = Math.max(320, Math.floor(rect.width));
       const h = Math.max(240, Math.floor(rect.height));
       const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
-      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const sx = niceScale(Math.min(...xs), Math.max(...xs), 6);
+      const sy = niceScale(Math.min(...ys), Math.max(...ys), 6);
+      const minX = sx.min, maxX = sx.max, minY = sy.min, maxY = sy.max;
       const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
       const colors = ["#0d9488", "#d97706", "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#0891b2"];
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -7538,8 +7583,11 @@
         const pt = projectScatterXY(w, h, true, minX, rx, minY, ry, p.x, p.y);
         ctx.fillStyle = colors[p.c % colors.length];
         ctx.beginPath();
-        ctx.arc(pt.px, pt.py, pointSize, 0, Math.PI * 2);
+        ctx.arc(pt.px, pt.py, Math.max(2, pointSize - 0.6), 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
     }
 
@@ -7553,10 +7601,12 @@
       canvas.height = Math.floor(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
 
       const xPos = {};
       const yPos = {};
-      const padL = 24, padR = 16, padT = 16, padB = 24;
+      const padL = 32, padR = 16, padT = 24, padB = 34;
       for (let i = 0; i < n; i++) {
         xPos[i] = padL + i * ((w - padL - padR) / Math.max(1, n - 1));
         yPos[i] = h - padB;
@@ -7578,12 +7628,37 @@
         yPos[cid] = ym;
         cid++;
       }
+      // frame and y ticks for publication readability
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(padL + 0.5, padT + 0.5, w - padL - padR - 1, h - padT - padB - 1);
+      const ticks = 4;
+      ctx.fillStyle = "#475569";
+      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (let i = 0; i <= ticks; i++) {
+        const t = i / ticks;
+        const y = h - padB - t * (h - padT - padB);
+        const v = t * maxH;
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.08)";
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR, y);
+        ctx.stroke();
+        ctx.fillText(formatChartTick(v), padL - 6, y);
+      }
       // cut line
       const yCut = h - padB - (Math.max(5, Math.min(95, cutPct)) / 100) * (h - padT - padB);
       ctx.strokeStyle = "rgba(255,92,122,0.9)";
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(padL, yCut); ctx.lineTo(w - padR, yCut); ctx.stroke();
+      ctx.fillStyle = "rgba(190, 24, 93, 0.95)";
+      ctx.font = "700 11px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(`cut ${Math.max(5, Math.min(95, cutPct)).toFixed(0)}%`, padL + 6, yCut - 4);
     }
 
     function heterosisRows() {
