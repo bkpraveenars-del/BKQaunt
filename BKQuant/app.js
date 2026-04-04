@@ -11564,6 +11564,179 @@ G4,1.12,35.8,2.22,11.7`;
     $("#faCompute").click();
   }
 
+  /** PCA (trait space): first k PCs of column-centered X; pure JS power iteration + deflation. */
+  function d2VecDot(a, b) {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+    return s;
+  }
+  function d2VecNorm(v) {
+    return Math.sqrt(d2VecDot(v, v));
+  }
+  function d2VecNormalize(v) {
+    const n = d2VecNorm(v);
+    if (n < 1e-15) return;
+    for (let i = 0; i < v.length; i++) v[i] /= n;
+  }
+  function d2MatVec(C, v) {
+    const p = C.length;
+    const out = Array(p).fill(0);
+    for (let i = 0; i < p; i++) for (let j = 0; j < v.length; j++) out[i] += C[i][j] * v[j];
+    return out;
+  }
+  function d2CovDeflate(C, lam, v) {
+    const p = C.length;
+    for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) C[a][b] -= lam * v[a] * v[b];
+  }
+  /** Returns { scores: n×3, varPct: [3] } for trait matrix X (n genotypes × p traits). */
+  function pcaTraitsTop3Scores(X) {
+    const n = X.length;
+    const p = X[0].length;
+    const mu = Array(p).fill(0);
+    for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) mu[j] += X[i][j];
+    for (let j = 0; j < p; j++) mu[j] /= n;
+    const Z = X.map((row) => row.map((v, j) => v - mu[j]));
+    const nf = Math.max(1, n - 1);
+    const C = Array.from({ length: p }, () => Array(p).fill(0));
+    for (let a = 0; a < p; a++) {
+      for (let b = 0; b < p; b++) {
+        let s = 0;
+        for (let i = 0; i < n; i++) s += Z[i][a] * Z[i][b];
+        C[a][b] = s / nf;
+      }
+    }
+    const Cwork = C.map((r) => r.slice());
+    const kMax = Math.min(3, p);
+    const evecs = [];
+    const evals = [];
+    for (let kk = 0; kk < kMax; kk++) {
+      const v = Array.from({ length: p }, (_, i) => Math.sin(i * 1.3 + kk * 2.1));
+      d2VecNormalize(v);
+      for (let it = 0; it < 140; it++) {
+        const w = d2MatVec(Cwork, v);
+        d2VecNormalize(w);
+        for (let i = 0; i < p; i++) v[i] = w[i];
+      }
+      const lam = Math.max(0, d2VecDot(v, d2MatVec(Cwork, v)));
+      evals.push(lam);
+      evecs.push(v.slice());
+      d2CovDeflate(Cwork, lam, v);
+    }
+    const trace = evals.reduce((a, b) => a + b, 0);
+    const varPct = evals.map((e) => (trace > 1e-12 ? (100 * e) / trace : 0));
+    const scores = Z.map((row) => {
+      const s = [];
+      for (let kk = 0; kk < kMax; kk++) s.push(d2VecDot(row, evecs[kk]));
+      while (s.length < 3) s.push(0);
+      return s;
+    });
+    return { scores, varPct };
+  }
+
+  function d2MeanDistanceToOthers(D2) {
+    const n = D2.length;
+    return Array.from({ length: n }, (_, i) => {
+      let s = 0;
+      let c = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        s += D2[i][j];
+        c++;
+      }
+      return c ? s / c : 0;
+    });
+  }
+
+  function renderD2PlotlyHeatmapAndPca3d(D2, names, Xuse) {
+    const heatEl = document.getElementById("d2PlotlyD2Heatmap");
+    const pcaEl = document.getElementById("d2PlotlyPca3d");
+    if (!heatEl || !pcaEl) return;
+    if (typeof Plotly === "undefined") {
+      heatEl.innerHTML = `<p class="muted small">Plotly failed to load — interactive D² / PCA figures unavailable.</p>`;
+      pcaEl.innerHTML = "";
+      return;
+    }
+    const dark = bkqPlotlyThemeIsDark();
+    const zText = D2.map((row) => row.map((v) => v.toFixed(2)));
+    const titleHeat = "<b>Mahalanobis D² distance matrix</b><br><sup>Complete pairwise divergence (matches numeric table)</sup>";
+    const layoutHeat = {
+      ...bkqPlotlyLayout(titleHeat, {
+        margin: { l: 112, r: 72, t: 96, b: 112 },
+        xaxis: { title: { text: "Genotypes" }, side: "bottom", tickangle: -40, automargin: true },
+        yaxis: { title: { text: "Genotypes" }, autorange: "reversed", automargin: true },
+      }),
+      height: 560,
+    };
+    Plotly.newPlot(
+      heatEl,
+      [
+        {
+          type: "heatmap",
+          z: D2,
+          x: names,
+          y: names,
+          colorscale: "RdYlBu_r",
+          text: zText,
+          texttemplate: "%{text}",
+          textfont: { size: 9 },
+          hoverongaps: false,
+          colorbar: { title: { text: "D²" }, outlinewidth: 0 },
+          hovertemplate: "Genotype %{x} vs %{y}<br>D²: %{z:.4f}<extra></extra>",
+        },
+      ],
+      layoutHeat,
+      bkqPlotlyConfig()
+    );
+
+    const { scores, varPct } = pcaTraitsTop3Scores(Xuse);
+    const avgD = d2MeanDistanceToOthers(D2);
+    const title3d = "<b>3D PCA of trait profiles</b><br><sup>Same trait matrix as D²; marker color = mean D² to others</sup>";
+    const layout3d = {
+      ...bkqPlotlyLayout(title3d, {
+        margin: { l: 0, r: 0, t: 96, b: 0 },
+        scene: {
+          xaxis: { title: `PC1 (${varPct[0]?.toFixed(1) ?? 0}% var.)` },
+          yaxis: { title: `PC2 (${varPct[1]?.toFixed(1) ?? 0}% var.)` },
+          zaxis: { title: `PC3 (${varPct[2]?.toFixed(1) ?? 0}% var.)` },
+          bgcolor: dark ? "#1e293b" : "#f1f5f9",
+        },
+        height: 520,
+      }),
+    };
+    Plotly.newPlot(
+      pcaEl,
+      [
+        {
+          type: "scatter3d",
+          mode: "markers+text",
+          x: scores.map((r) => r[0]),
+          y: scores.map((r) => r[1]),
+          z: scores.map((r) => r[2]),
+          text: names,
+          textposition: "top center",
+          marker: {
+            size: 10,
+            color: avgD,
+            colorscale: "Viridis",
+            colorbar: { title: { text: "Mean D²" }, outlinewidth: 0 },
+            opacity: 0.88,
+            line: { width: 2, color: dark ? "#e2e8f0" : "#0f172a" },
+          },
+          hovertemplate: "<b>%{text}</b><br>PC1: %{x:.3f}<br>PC2: %{y:.3f}<br>PC3: %{z:.3f}<extra></extra>",
+        },
+      ],
+      layout3d,
+      bkqPlotlyConfig()
+    );
+  }
+
+  function purgeD2PlotlyFigures() {
+    ["d2PlotlyD2Heatmap", "d2PlotlyPca3d"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && typeof Plotly !== "undefined" && Plotly.purge) Plotly.purge(el);
+    });
+  }
+
   // --- D2 Analysis with multiple clustering methods ---
   function renderD2Analysis() {
     const title = "D2 Analysis and Cluster Diagrams";
@@ -11646,6 +11819,22 @@ G4,1.12,35.8,2.22,11.7`;
             <div class="muted small" style="margin-top:6px">Full Mahalanobis D² matrix (same values as Table 1 in the report).</div>
             <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2IntraInterBarChart" style="width:100%;height:100%"></canvas></div>
             <div class="muted small" style="margin-top:4px">Intra-cluster mean D² vs mean inter-cluster D² for each consensus group (C1, C2, …).</div>
+            <h4 style="margin-top:18px;margin-bottom:8px">Interactive Plotly views</h4>
+            <div class="actions" style="margin:0 0 10px;flex-wrap:wrap;align-items:center;gap:10px">
+              <label class="muted small" style="display:flex;align-items:center;gap:8px;margin:0;font-weight:650">
+                Plotly theme
+                <select id="d2PlotlyTheme" aria-label="Plotly figure theme for D2 module" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+                  <option value="light">Light (print)</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <span class="muted small" style="line-height:1.45;max-width:42rem">Same setting as Biometric Report; your choice is saved in this browser.</span>
+            </div>
+            <p class="muted small" style="margin:0 0 8px">Zoom, pan, and download PNG from the mode bar. Same D² matrix as Table 1; 3D PCA uses the trait matrix (aligned with D² analysis).</p>
+            <div id="d2PlotlyD2Heatmap" class="plotly-chart js-plotly-plot" style="min-height:520px;margin-top:8px"></div>
+            <div class="muted small" style="margin-top:6px">Annotated heatmap: Mahalanobis D² between all genotype pairs.</div>
+            <div id="d2PlotlyPca3d" class="plotly-chart js-plotly-plot" style="min-height:520px;margin-top:16px"></div>
+            <div class="muted small" style="margin-top:6px">3D PCA of trait profiles; point color = mean pairwise D² to other genotypes (diversity context).</div>
             <div id="d2Tables" style="margin-top:12px"></div>
           </div>
         </div>
@@ -12119,6 +12308,8 @@ G4,1.12,35.8,2.22,11.7`;
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
 
+      const xPos = {};
+      const yPos = {};
       const labels = leafLabels && leafLabels.length === n ? leafLabels : Array.from({ length: n }, (_, i) => `G${i + 1}`);
       const maxLab = Math.max(8, ...labels.map((s) => String(s).length));
       const padL = 36, padR = 16, padT = 26, padB = labels ? Math.min(110, 36 + Math.min(maxLab * 5, 72)) : 34;
@@ -12341,6 +12532,16 @@ G4,1.12,35.8,2.22,11.7`;
     }
 
     build(defaultN, defaultT);
+
+    const d2PlotlyThemeSel = document.getElementById("d2PlotlyTheme");
+    if (d2PlotlyThemeSel) {
+      d2PlotlyThemeSel.value = localStorage.getItem("bkq_plotly_theme") === "dark" ? "dark" : "light";
+      d2PlotlyThemeSel.addEventListener("change", () => {
+        localStorage.setItem("bkq_plotly_theme", d2PlotlyThemeSel.value === "dark" ? "dark" : "light");
+        $("#d2Compute").click();
+      });
+    }
+
     $("#d2Build").addEventListener("click", () => {
       const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
       const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
@@ -12367,10 +12568,23 @@ G4,1.12,35.8,2.22,11.7`;
         alert(err?.message || String(err));
         return;
       }
-      const mat = parseNumericCsvMatrix(txt);
-      if (!mat.length) return;
-      const n = Math.max(5, Math.min(40, mat.length));
-      const p = Math.max(2, Math.min(10, Math.min(...mat.map((r) => r.length))));
+      const parsed = parseD2TraitImport(txt);
+      let n;
+      let p;
+      let mat;
+      let nameRow = null;
+      if (parsed && parsed.X?.length) {
+        n = Math.max(5, Math.min(40, parsed.n));
+        p = Math.max(2, Math.min(10, parsed.p));
+        mat = parsed.X.map((row) => row.slice(0, p));
+        nameRow = parsed.names;
+      } else {
+        mat = parseNumericCsvMatrix(txt);
+        if (!mat.length) return;
+        n = Math.max(5, Math.min(40, mat.length));
+        p = Math.max(2, Math.min(10, Math.min(...mat.map((r) => r.length))));
+        nameRow = null;
+      }
       $("#d2N").value = String(n);
       $("#d2T").value = String(p);
       build(n, p);
@@ -12379,6 +12593,12 @@ G4,1.12,35.8,2.22,11.7`;
         if (!Number.isFinite(v)) continue;
         const input = document.querySelector(`#d2Wrap input[data-d2="g${i}t${j}"]`);
         if (input) input.value = String(v);
+      }
+      if (nameRow && nameRow.length === n) {
+        for (let i = 0; i < n; i++) {
+          const inp = document.querySelector(`#d2Wrap input[data-d2-name="${i}"]`);
+          if (inp) inp.value = String(nameRow[i] || `G${i + 1}`).slice(0, 48);
+        }
       }
       $("#d2Compute").click();
       e.target.value = "";
@@ -12399,6 +12619,7 @@ G4,1.12,35.8,2.22,11.7`;
         }
       }
       if (shouldBlockForValidation("d2", errors, "#d2Kpis")) return;
+      purgeD2PlotlyFigures();
       const std = !!$("#d2Standardize")?.checked;
       const Xuse = std ? zScoreColumns(X).Z : X;
       const k = Math.max(2, Math.min(12, Number($("#d2K").value || 3)));
@@ -12496,6 +12717,7 @@ G4,1.12,35.8,2.22,11.7`;
       const intraInterMat = clusterIntraInterD2MeanMatrix(D2, clusters, cKeys);
       drawD2MatrixHeatmap($("#d2D2HeatmapChart"), D2, names);
       drawIntraInterClusterBars($("#d2IntraInterBarChart"), intraInterMat, cKeys);
+      renderD2PlotlyHeatmapAndPca3d(D2, names, Xuse);
       const intraRows = cKeys.map((c) => [
         `Cluster ${c + 1}`,
         clusters[c].map((i) => names[i] || `G${i + 1}`).join(", "),
