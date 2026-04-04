@@ -1,0 +1,20 @@
+# BKQuant / Website Development — Cursor rules
+
+## Design & UI
+- Prefer a **modern, minimal** aesthetic with **generous whitespace** (use a consistent **8px or 16px** spacing rhythm in UI work).
+- Typography: favor **Inter** or **system UI stacks** that approximate **SF Pro** on Apple (`ui-sans-serif, system-ui, "Inter", "Segoe UI", sans-serif`). When adding or changing fonts, prefer Inter via Google Fonts or `font-sans` with Tailwind if already in use.
+- Color: use **restrained, professional** palettes (neutral grays + one primary accent); avoid loud gradients unless the user asks; high contrast for text (WCAG-friendly).
+- Visual hierarchy: clear **heading levels**, readable line length for body copy, balanced alignment; subtle shadows and borders over heavy decoration.
+- Motion: **subtle** only (short durations, ease-out); no gratuitous animation.
+
+## Tech context (this repo)
+- BKQuant uses **vanilla HTML + JS** (`app.js`) and **Tailwind CDN** in places; **Shadcn/ui** requires React—do not assume it unless the project is migrated.
+- Prefer matching existing patterns in `styles.css` and Tailwind classes already present in `index.html`.
+
+## Workflow
+- For **large, cross-file** UI or refactors, the user prefers **Cursor Composer (multi-file mode)**.
+- For design-heavy homepage or layout work, prefer **stronger models** when available (e.g. Claude Opus/Sonnet or GPT-4.1-class) — user switches this in Cursor settings.
+
+## Code quality
+- Make **focused** changes; avoid drive-by refactors unrelated to the task.
+- Do not add documentation files unless the user asks.

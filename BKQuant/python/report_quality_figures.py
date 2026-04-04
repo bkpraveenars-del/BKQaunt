@@ -27,7 +27,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("bkq_figure.png"))
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--title", default="", help="Figure title")
-    parser.add_argument("--style", default="seaborn-v0_8-whitegrid", help="matplotlib style name")
+    parser.add_argument(
+        "--style",
+        default="seaborn-v0_8-whitegrid",
+        help="matplotlib style (e.g. seaborn-v0_8-whitegrid, seaborn-v0_8-darkgrid, ggplot)",
+    )
     args = parser.parse_args()
 
     try:
@@ -51,12 +55,28 @@ def main() -> int:
     except OSError:
         plt.style.use("seaborn-v0_8-whitegrid")
 
+    plt.rcParams["figure.dpi"] = 300
+    plt.rcParams["savefig.dpi"] = 300
+    plt.rcParams["font.size"] = 12
+    plt.rcParams["axes.titlesize"] = 13
+    plt.rcParams["axes.labelsize"] = 12
+    plt.rcParams["xtick.labelsize"] = 11
+    plt.rcParams["ytick.labelsize"] = 11
+    plt.rcParams["legend.fontsize"] = 10
+    plt.rcParams["axes.grid"] = True
+    plt.rcParams["grid.alpha"] = 0.35
+
+    try:
+        sns.set_theme(style="whitegrid", palette="deep", font_scale=1.05)
+    except Exception:
+        pass
+
     df = pd.read_csv(args.csv)
     if args.x not in df.columns or args.y not in df.columns:
         print(f"Columns missing. Have: {list(df.columns)}", file=sys.stderr)
         return 1
 
-    fig, ax = plt.subplots(figsize=(9, 5.2), dpi=args.dpi)
+    fig, ax = plt.subplots(figsize=(9, 5.2))
     title = args.title or f"{args.y} vs {args.x}"
 
     if args.kind == "bar":
