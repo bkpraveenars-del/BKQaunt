@@ -2,7 +2,7 @@
    - Login gate (localStorage)
    - "Windows icon" style tiles
    - Each analysis renders: input (where simple), results table, chart(s), interpretation
-   - Export to DOC/XLS: HTML with separated tables + Plotly PNG + canvas; optional Python matplotlib script for print figures
+   - Export to Word (.mht MHTML with CID image parts) / XLS: tables + rasterized figures; optional Python matplotlib script for print figures
 */
 
 (() => {
@@ -113,7 +113,63 @@
     sessionStorage.removeItem(SESSION_UPLOAD_KEY);
   }
 
-  /** CSV text, or first sheet of Excel as CSV (requires XLSX global from index.html). */
+  const BKQ_DATA_FILE_ACCEPT =
+    ".csv,.txt,.tsv,.xlsx,.xls,.ods,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+  /** Wire Import button + file input; onText receives CSV string (Excel first sheet). */
+  function bindCsvExcelFileImport(importBtnId, fileInputId, onText) {
+    const btn = document.getElementById(importBtnId);
+    const inp = document.getElementById(fileInputId);
+    if (!btn || !inp) return;
+    btn.addEventListener("click", () => inp.click());
+    inp.addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      inp.value = "";
+      if (!f) return;
+      try {
+        const txt = await fileToCsvText(f);
+        await onText(txt);
+      } catch (err) {
+        alert(err?.message || String(err));
+      }
+    });
+  }
+
+  function bindCsvExcelToTextarea(importBtnId, fileInputId, textareaId) {
+    bindCsvExcelFileImport(importBtnId, fileInputId, async (txt) => {
+      const ta = document.getElementById(textareaId);
+      if (!ta) return;
+      ta.value = txt;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  /** Optional first column labels; remaining columns = numeric grid (CRD/RBD-style). */
+  function parseRectDataGridCsv(txt) {
+    const raw = parseCsv(txt)
+      .map((r) => r.map((c) => String(c).trim()))
+      .filter((r) => r.some((c) => c !== ""));
+    if (!raw.length) return null;
+    const first = raw[0];
+    const numericFirst = Number.isFinite(Number(first[0]));
+    let startCol = 0;
+    if (!numericFirst && first.length >= 2 && first.slice(1).every((c) => Number.isFinite(Number(c)))) startCol = 1;
+    const r = Math.max(0, ...raw.map((row) => row.length - startCol));
+    if (r < 2 || raw.length < 2) return null;
+    const t = raw.length;
+    const matrix = [];
+    for (let i = 0; i < t; i++) {
+      const row = [];
+      for (let j = 0; j < r; j++) {
+        const v = Number(raw[i][startCol + j]);
+        if (!Number.isFinite(v)) return null;
+        row.push(v);
+      }
+      matrix.push(row);
+    }
+    return { matrix, t, r };
+  }
+
   async function fileToCsvText(file) {
     const name = (file.name || "").toLowerCase();
     const mime = file.type || "";
@@ -263,12 +319,43 @@ G3,4.0,4.3,4.2</pre>
     downloadBlob(filename, "text/csv;charset=utf-8", csv);
   }
 
-  function canvasToDataUrl(canvas) {
+  /** Raster snapshot for Word/HTML: PNG (JPEG if huge). Returns display width/height for mso-friendly <img> attrs. */
+  function canvasToExportSrc(canvas) {
     try {
-      return canvas.toDataURL("image/png");
-    } catch {
-      return "";
+      const dpr = Math.min(3, window.devicePixelRatio || 1);
+      let rect = canvas.getBoundingClientRect();
+      let cssW = Math.round(rect.width || 0);
+      let cssH = Math.round(rect.height || 0);
+      if (cssW < 4 || cssH < 4) {
+        const chart = canvas.closest(".chart");
+        if (chart) {
+          const r2 = chart.getBoundingClientRect();
+          cssW = Math.max(cssW, Math.round(r2.width || 0));
+          cssH = Math.max(cssH, Math.round(r2.height || 0));
+        }
+      }
+      if (cssW < 4) cssW = Math.max(400, Math.round(canvas.width / dpr));
+      if (cssH < 4) cssH = Math.max(240, Math.round(canvas.height / dpr));
+      cssW = Math.max(1, cssW);
+      cssH = Math.max(1, cssH);
+      let dataUrl = canvas.toDataURL("image/png");
+      if (dataUrl.length > 2_400_000) {
+        dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+      }
+      const maxW = 900;
+      const dispW = Math.min(maxW, cssW);
+      const dispH = Math.round(cssH * (dispW / cssW));
+      return { src: dataUrl, w: dispW, h: dispH };
+    } catch (e) {
+      console.warn("BKQuant export: canvas snapshot failed", e);
+      return { src: "", w: 0, h: 0 };
     }
+  }
+
+  function exportFigureImgTag(n, src, w, h) {
+    if (!src || src.length < 32) return "";
+    const wh = w > 0 && h > 0 ? ` width="${w}" height="${h}"` : "";
+    return `<img alt="Figure ${n}" src="${src}"${wh} style="width:${w || 720}px;max-width:100%;height:auto;display:block;border:1px solid #cbd5e1;mso-width-percent:1000"/>`;
   }
 
   function svgToDataUrl(svgEl) {
@@ -281,6 +368,45 @@ G3,4.0,4.3,4.2</pre>
       return `data:image/svg+xml;charset=utf-8,${encoded}`;
     } catch {
       return "";
+    }
+  }
+
+  /** Rasterize inline SVG so Word shows a bitmap (many builds omit data:image/svg+xml in <img>). */
+  async function svgToExportSrc(svgEl) {
+    try {
+      const xml = new XMLSerializer().serializeToString(svgEl);
+      let w = 860;
+      let h = 360;
+      const vb = svgEl.getAttribute("viewBox");
+      if (vb) {
+        const p = vb.trim().split(/[\s,]+/).map(Number);
+        if (p.length >= 4 && p[2] > 0 && p[3] > 0) {
+          w = p[2];
+          h = p[3];
+        }
+      }
+      const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("svg img load"));
+        img.src = url;
+      });
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(2.5, 1100 / Math.max(w, h));
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      return canvasToExportSrc(canvas);
+    } catch (e) {
+      console.warn("BKQuant export: SVG rasterize failed, using SVG data URL", e);
+      const src = svgToDataUrl(svgEl);
+      return { src, w: 720, h: 300 };
     }
   }
 
@@ -306,17 +432,20 @@ G3,4.0,4.3,4.2</pre>
     for (const el of plotlyRoots) {
       try {
         if (typeof Plotly !== "undefined" && Plotly.toImage) {
+          const pw = 1400;
+          const ph = 820;
           const dataUrl = await Plotly.toImage(el, {
             format: "png",
-            width: 960,
-            height: 560,
-            scale: 2,
+            width: pw,
+            height: ph,
+            scale: 3,
           });
           n += 1;
+          const img = exportFigureImgTag(n, dataUrl, pw, ph);
           blocks.push(
             `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
               <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n} (chart)</p>
-              <img alt="Figure ${n}" src="${dataUrl}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+              ${img}
             </div>`
           );
         }
@@ -327,26 +456,28 @@ G3,4.0,4.3,4.2</pre>
 
     const canvases = $$("#contentBody canvas").filter((c) => !c.closest(".js-plotly-plot"));
     for (const c of canvases) {
-      const src = canvasToDataUrl(c);
+      const { src, w, h } = canvasToExportSrc(c);
       if (!src) continue;
       n += 1;
+      const img = exportFigureImgTag(n, src, w, h);
       blocks.push(
         `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
           <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n}</p>
-          <img alt="Figure ${n}" src="${src}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+          ${img}
         </div>`
       );
     }
 
     const svgs = $$('#contentBody svg[data-exportable="1"]').filter((s) => !s.closest(".js-plotly-plot"));
     for (const s of svgs) {
-      const src = svgToDataUrl(s);
+      const { src, w, h } = await svgToExportSrc(s);
       if (!src) continue;
       n += 1;
+      const img = exportFigureImgTag(n, src, w, h);
       blocks.push(
         `<div style="margin:20px 0;page-break-inside:avoid;break-inside:avoid">
           <p style="font-weight:800;margin:0 0 8px;font-size:13px;color:#0f172a">Figure ${n}</p>
-          <img alt="Figure ${n}" src="${src}" style="max-width:100%;height:auto;display:block;border:1px solid #cbd5e1"/>
+          ${img}
         </div>`
       );
     }
@@ -367,15 +498,83 @@ G3,4.0,4.3,4.2</pre>
     });
   }
 
-  /** Build DOC/XLS HTML with separated tables + embedded figures (Plotly PNG, canvas, SVG). */
-  async function exportHtmlAsDocOrXls({ title, moduleId = "", interpretSelector = ".export-interpretation", filename, asExcel }) {
-    const tables = getExportTablesFromContentBody();
-    const interpretation = document.querySelector(interpretSelector)?.innerText || "";
-    const meta = loadReportMeta() || {};
+  /** Short data-layout text included in Word/Excel exports (matches on-screen Import blurbs). */
+  const MODULE_EXPORT_INPUT_FORMAT = {
+    crd:
+      "CRD grid: optional first column with treatment labels (T1, T2, …); remaining columns = replicate yields. Or omit labels — all numeric rows (treatments × replicates). Import updates T×R from the file.",
+    rbd:
+      "RBD grid: optional first column for treatment IDs; other columns = blocks (replications). Or all-numeric rows: treatments × blocks. Set T and B, Build grid, then Import.",
+    factorial:
+      "Factorial: set a, b, r and Build grid first. File = a×b rows (A×B combinations in table order) × r block columns; optional label column.",
+    fact3:
+      "Three-way factorial: set a, b, c, r and Build grid first. File = a×b×c rows × r columns; optional label column.",
+    lattice:
+      "Latin square: set t and Build square first. File = t rows × t numeric columns (plot yields); optional row label column.",
+    augmented:
+      "Augmented design: enter checks and new entries in the built tables (Import from file not yet provided — use paste or grid).",
+    splitplot:
+      "Split plot: set a, b, r and Build grid first. File = a×b rows × r columns; optional label column.",
+    correlation:
+      "Correlation: ≥3×3 numeric matrix, or two columns X,Y. See module Import blurb for details.",
+    corpath:
+      "Trait matrix: rows = plots/lines; optional Genotype column + trait columns (same as Import CSV / Excel).",
+    regression: "Two columns: X then Y (optional header). ≥3 rows.",
+    mlr: "Matrix: observations × variables; header optional (same as Import).",
+    pca: "Observations × variables matrix; optional header row.",
+    path: "Path calculator uses the built correlation matrix (paste or manual entry).",
+    discriminant: "Grouped observations × variables (see module).",
+    factoranalysis: "Data matrix as in module (Import CSV / Excel).",
+    d2: "D² input layout as in module (Import CSV / Excel).",
+    metroglyph: "Columns: Genotype, Cluster, Trait1, Trait2, … — numeric traits; ≥6 genotypes.",
+    linetester: "Line × tester layout as in module (Import).",
+    diallel: "Diallel: use graphical or DA screens; DA I includes Import where shown.",
+    nc: "NC designs: fill grids per tab (Import not bundled — use grid entry).",
+    triple: "TTC: columns Line (optional), L1, L2, L3 (Import CSV / Excel).",
+    genmean: "One row: P1, P2, F1, F2, BC1, BC2 or named header row.",
+    met: "MET layout as in module (Import CSV / Excel).",
+    ammi: "AMMI matrix as in module (Import CSV / Excel).",
+    biometric: "Genotype × trait or CRD matrix (Import buttons on module).",
+    dataInsights: "Traits CSV: genotype column + trait columns (Import CSV / Excel).",
+  };
 
-    const figureBlocks = await collectExportFigureBlocks();
+  function wrapHtmlAsMhtml(htmlDocument) {
+    const boundary = `----=_BKQ_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const imageParts = [];
+    let n = 0;
+    const htmlProcessed = htmlDocument.replace(/src="data:image\/(png|jpeg|jpg);base64,([^"]+)"/gi, (_, typ, b64) => {
+      n += 1;
+      const mime = typ.toLowerCase() === "png" ? "image/png" : "image/jpeg";
+      const cid = `bkqfig${n}@bkquant.local`;
+      imageParts.push({ mime, b64: String(b64).replace(/\s+/g, ""), cid });
+      return `src="cid:${cid}"`;
+    });
 
-    const tableHtml = tables
+    const crlf = "\r\n";
+    const lines = [];
+    lines.push("MIME-Version: 1.0");
+    lines.push(`Content-Type: multipart/related; type="text/html"; boundary="${boundary}"`);
+    lines.push("");
+    lines.push(`--${boundary}`);
+    lines.push("Content-Type: text/html; charset=utf-8");
+    lines.push("Content-Transfer-Encoding: 8bit");
+    lines.push("Content-Location: file:///C:/bkquant/report.htm");
+    lines.push("");
+    lines.push(String(htmlProcessed).replace(/\r?\n/g, crlf));
+
+    for (const p of imageParts) {
+      lines.push(`--${boundary}`);
+      lines.push(`Content-Type: ${p.mime}`);
+      lines.push("Content-Transfer-Encoding: base64");
+      lines.push(`Content-ID: <${p.cid}>`);
+      lines.push("");
+      lines.push(p.b64);
+    }
+    lines.push(`--${boundary}--`);
+    return lines.join(crlf);
+  }
+
+  function buildExportTableSectionsHtml(tables, asExcel) {
+    return tables
       .map((t, i) => {
         const prev = t.previousElementSibling;
         const capRaw =
@@ -395,6 +594,18 @@ G3,4.0,4.3,4.2</pre>
         </div>`;
       })
       .join("\n");
+  }
+
+  /** Build DOC/XLS HTML with separated tables + embedded figures (Plotly PNG, canvas, SVG). */
+  async function exportHtmlAsDocOrXls({ title, moduleId = "", interpretSelector = ".export-interpretation", filename, asExcel }) {
+    const tables = getExportTablesFromContentBody();
+    const interpretation = document.querySelector(interpretSelector)?.innerText || "";
+    const meta = loadReportMeta() || {};
+
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const figureBlocks = await collectExportFigureBlocks();
+
+    const tableHtml = buildExportTableSectionsHtml(tables, asExcel);
 
     const metaRows = [
       ["Website", "BKQuant"],
@@ -449,21 +660,32 @@ G3,4.0,4.3,4.2</pre>
       </div>
     `;
 
+    const inputFmt = MODULE_EXPORT_INPUT_FORMAT[moduleId || CURRENT_MODULE_ID || ""] || "";
+    const inputFormatBlock = inputFmt
+      ? `<h2>Data import format</h2><p style="white-space:pre-wrap;line-height:1.55">${qs(inputFmt)}</p>`
+      : "";
+
     // Word/Excel open HTML; explicit spacing + page-break hints for Word; row spacers for Excel HTML.
     const styles = asExcel
       ? `table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:12px}th,td{border:1px solid #999;padding:6px;text-align:center}h1{font-size:18px}h2{font-size:15px;margin-top:16px}h3{font-size:13px;text-align:left}img{max-width:100%;height:auto}`
       : `body{font-family:Calibri,Arial,sans-serif;font-size:12px;line-height:1.45}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:6px}h1{font-size:20px;margin-bottom:8px}h2{font-size:16px;margin:20px 0 10px;color:#0f172a}h3{font-size:14px}img{max-width:100%;height:auto}`;
 
+    const htmlNs = asExcel
+      ? `xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"`
+      : `xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"`;
+
     const doc = `<!doctype html>
-<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+<html ${htmlNs}>
 <head>
   <meta charset="utf-8"/>
+  <meta name="ProgId" content="Word.Document"/>
   <title>${qs(title)}</title>
   <style>${styles}</style>
 </head>
 <body>
   <h1>${qs(title)}</h1>
   ${metaTable}
+  ${inputFormatBlock}
   ${figureBlocks}
   <h2>Tables</h2>
   ${tableHtml}
@@ -473,28 +695,269 @@ G3,4.0,4.3,4.2</pre>
 </body>
 </html>`;
 
-    downloadBlob(filename, asExcel ? "application/vnd.ms-excel" : "application/msword", doc);
+    if (asExcel) {
+      downloadBlob(filename, "application/vnd.ms-excel", doc);
+    } else {
+      const mhtName = filename.replace(/\.doc$/i, ".mht");
+      const mhtml = wrapHtmlAsMhtml(doc);
+      downloadBlob(mhtName, "multipart/related", mhtml);
+    }
   }
 
   // -----------------------------
-  // Publication-grade chart drawing helpers
+  // Publication-grade chart drawing helpers (themes + canvas toolbars)
   // -----------------------------
-  const CHART = {
-    bg: "#ffffff",
-    ink: "#0b1220",
-    inkMuted: "#344256",
-    frame: "rgba(15, 23, 42, 0.2)",
-    grid: "rgba(15, 23, 42, 0.12)",
-    axis: "#1e293b",
-    bar0: "#1d4ed8",
-    bar1: "#0f766e",
-    point: "#1d4ed8",
-    pointStroke: "#ffffff",
-    lineFit: "#b91c1c",
-    lineAlt: "#0f766e",
-    accentAmber: "#d97706",
-    pointPalette: ["#1d4ed8", "#059669", "#dc2626", "#7c3aed", "#ea580c", "#0f766e", "#be123c"],
+  const CHART_THEMES = {
+    emerald: {
+      bg: "#f8fafc",
+      plotBgTop: "#ffffff",
+      plotBgBottom: "#eef2f7",
+      ink: "#0f172a",
+      inkMuted: "#475569",
+      frame: "rgba(15, 23, 42, 0.14)",
+      grid: "rgba(148, 163, 184, 0.42)",
+      axis: "#334155",
+      bar0: "#059669",
+      bar1: "#047857",
+      point: "#059669",
+      pointStroke: "#ffffff",
+      lineFit: "#b91c1c",
+      lineAlt: "#0d9488",
+      accentAmber: "#d97706",
+      pointPalette: ["#059669", "#2563eb", "#d97706", "#dc2626", "#7c3aed", "#ea580c", "#0e7490", "#be123c"],
+    },
+    ocean: {
+      bg: "#f0f9ff",
+      plotBgTop: "#ffffff",
+      plotBgBottom: "#e0f2fe",
+      ink: "#0c4a6e",
+      inkMuted: "#0369a1",
+      frame: "rgba(3, 105, 161, 0.2)",
+      grid: "rgba(56, 189, 248, 0.38)",
+      axis: "#075985",
+      bar0: "#0284c7",
+      bar1: "#0369a1",
+      point: "#0284c7",
+      pointStroke: "#ffffff",
+      lineFit: "#be123c",
+      lineAlt: "#0891b2",
+      accentAmber: "#f59e0b",
+      pointPalette: ["#0284c7", "#06b6d4", "#6366f1", "#8b5cf6", "#0ea5e9", "#14b8a6", "#f97316", "#ec4899"],
+    },
+    sunset: {
+      bg: "#fffbeb",
+      plotBgTop: "#ffffff",
+      plotBgBottom: "#ffedd5",
+      ink: "#431407",
+      inkMuted: "#9a3412",
+      frame: "rgba(154, 52, 18, 0.18)",
+      grid: "rgba(251, 146, 60, 0.38)",
+      axis: "#9a3412",
+      bar0: "#ea580c",
+      bar1: "#c2410c",
+      point: "#ea580c",
+      pointStroke: "#ffffff",
+      lineFit: "#7c3aed",
+      lineAlt: "#db2777",
+      accentAmber: "#ca8a04",
+      pointPalette: ["#ea580c", "#dc2626", "#ca8a04", "#16a34a", "#2563eb", "#9333ea", "#db2777", "#0891b2"],
+    },
+    ink: {
+      bg: "#fafafa",
+      plotBgTop: "#ffffff",
+      plotBgBottom: "#f4f4f5",
+      ink: "#18181b",
+      inkMuted: "#52525b",
+      frame: "rgba(24, 24, 27, 0.15)",
+      grid: "rgba(113, 113, 122, 0.38)",
+      axis: "#3f3f46",
+      bar0: "#52525b",
+      bar1: "#27272a",
+      point: "#3f3f46",
+      pointStroke: "#ffffff",
+      lineFit: "#71717a",
+      lineAlt: "#a1a1aa",
+      accentAmber: "#a16207",
+      pointPalette: ["#3f3f46", "#52525b", "#71717a", "#a1a1aa", "#78716c", "#57534e", "#44403c", "#292524"],
+    },
   };
+
+  const CHART = { ...CHART_THEMES.emerald };
+
+  function applyChartThemeFromStorage() {
+    const name = localStorage.getItem("bkq_chart_theme") || "emerald";
+    const t = CHART_THEMES[name] || CHART_THEMES.emerald;
+    Object.assign(CHART, t);
+  }
+
+  function chartBarsMultiColor() {
+    return (localStorage.getItem("bkq_chart_bars") || "multi") !== "gradient";
+  }
+
+  function darkenHex(hex, amt) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ""));
+    if (!m) return "#047857";
+    const n = parseInt(m[1], 16);
+    const r = Math.max(0, Math.min(255, Math.round(((n >> 16) & 0xff) * (1 - amt))));
+    const g = Math.max(0, Math.min(255, Math.round(((n >> 8) & 0xff) * (1 - amt))));
+    const b = Math.max(0, Math.min(255, Math.round((n & 0xff) * (1 - amt))));
+    return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+  }
+
+  function barFillGradient(ctx, x, y, w, h, i, multiColor) {
+    if (multiColor) {
+      const c = CHART.pointPalette[i % CHART.pointPalette.length];
+      const g = ctx.createLinearGradient(x, y, x + w, y + h);
+      g.addColorStop(0, c);
+      g.addColorStop(1, darkenHex(c, 0.28));
+      return g;
+    }
+    const g = ctx.createLinearGradient(x, y, x + w, y + h);
+    g.addColorStop(0, CHART.bar0);
+    g.addColorStop(1, CHART.bar1);
+    return g;
+  }
+
+  function fillPlotBackground(ctx, padL, plotTop, plotW, plotH) {
+    const g = ctx.createLinearGradient(0, plotTop, 0, plotTop + plotH);
+    g.addColorStop(0, CHART.plotBgTop || CHART.bg);
+    g.addColorStop(1, CHART.plotBgBottom || CHART.bg);
+    ctx.fillStyle = g;
+    ctx.fillRect(padL, plotTop, plotW, plotH);
+  }
+
+  function downloadCanvasPng(canvas, filename) {
+    try {
+      const url = canvas.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || "bkquant-chart.png";
+      a.click();
+    } catch (e) {
+      alert(e?.message || "Could not export chart image.");
+    }
+  }
+
+  function downloadSvgElement(svgEl, filename) {
+    try {
+      const xml = new XMLSerializer().serializeToString(svgEl);
+      const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || "bkquant-figure.svg";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e?.message || "Could not export SVG.");
+    }
+  }
+
+  /** Add theme + download controls to each .chart (canvas or exportable SVG). Idempotent. */
+  function initChartPanels(containerSel = "#contentBody") {
+    const root = document.querySelector(containerSel);
+    if (!root) return;
+
+    const themeOpts = [
+      ["emerald", "Emerald"],
+      ["ocean", "Ocean"],
+      ["sunset", "Sunset"],
+      ["ink", "Ink"],
+    ];
+    const barOpts = [
+      ["multi", "Multi-color bars"],
+      ["gradient", "Two-tone gradient"],
+    ];
+
+    root.querySelectorAll(".chart").forEach((chartEl) => {
+      if (chartEl.dataset.bkqChartUi === "1") return;
+      const canvas = chartEl.querySelector("canvas");
+      const svg = chartEl.querySelector('svg[data-exportable="1"]');
+      if (!canvas && !svg) return;
+
+      chartEl.dataset.bkqChartUi = "1";
+      chartEl.classList.add("chart--with-toolbar");
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "chart-toolbar";
+      const fullControls = Boolean(canvas);
+      toolbar.innerHTML = fullControls
+        ? `
+        <div class="chart-toolbar__lead">
+          <span class="chart-toolbar__label">Figure</span>
+          <details class="chart-toolbar__opts">
+            <summary class="chart-toolbar__summary">Customize</summary>
+            <div class="chart-toolbar__opts-inner">
+              <label class="chart-toolbar__field">
+                <span>Theme</span>
+                <select data-bkq-chart-theme aria-label="Chart color theme">
+                  ${themeOpts.map(([v, lab]) => `<option value="${v}">${lab}</option>`).join("")}
+                </select>
+              </label>
+              <label class="chart-toolbar__field">
+                <span>Bars</span>
+                <select data-bkq-chart-bars aria-label="Bar style">
+                  ${barOpts.map(([v, lab]) => `<option value="${v}">${lab}</option>`).join("")}
+                </select>
+              </label>
+              <p class="chart-toolbar-hint">Theme and bar style apply after you click <strong>Compute</strong> again.</p>
+            </div>
+          </details>
+        </div>
+        <button type="button" class="chart-download-btn chart-download-btn--primary" data-bkq-chart-download title="Download PNG" aria-label="Download figure as PNG">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>
+          </svg>
+        </button>
+      `
+        : `
+        <div class="chart-toolbar__lead">
+          <span class="chart-toolbar__label">Figure</span>
+          <details class="chart-toolbar__opts chart-toolbar__opts--minimal">
+            <summary class="chart-toolbar__summary">About this figure</summary>
+            <p class="chart-toolbar-hint">Vector diagram — use the download button for SVG.</p>
+          </details>
+        </div>
+        <button type="button" class="chart-download-btn chart-download-btn--primary" data-bkq-chart-download title="Download SVG" aria-label="Download figure as SVG">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>
+          </svg>
+        </button>
+      `;
+
+      const selTheme = toolbar.querySelector("[data-bkq-chart-theme]");
+      const selBars = toolbar.querySelector("[data-bkq-chart-bars]");
+      if (selTheme) selTheme.value = localStorage.getItem("bkq_chart_theme") || "emerald";
+      if (selBars) selBars.value = localStorage.getItem("bkq_chart_bars") || "multi";
+
+      selTheme?.addEventListener("change", () => {
+        localStorage.setItem("bkq_chart_theme", selTheme.value);
+      });
+      selBars?.addEventListener("change", () => {
+        localStorage.setItem("bkq_chart_bars", selBars.value);
+      });
+
+      toolbar.querySelector("[data-bkq-chart-download]")?.addEventListener("click", () => {
+        if (canvas) {
+          const id = canvas.id || "chart";
+          downloadCanvasPng(canvas, `${id.replace(/[^a-z0-9_-]/gi, "_")}.png`);
+        } else if (svg) {
+          const id = svg.id || "figure";
+          downloadSvgElement(svg, `${id.replace(/[^a-z0-9_-]/gi, "_")}.svg`);
+        }
+      });
+
+      if (canvas) {
+        const wrap = document.createElement("div");
+        wrap.className = "chart-canvas-wrap";
+        chartEl.insertBefore(toolbar, canvas);
+        chartEl.insertBefore(wrap, canvas);
+        wrap.appendChild(canvas);
+      } else {
+        chartEl.insertBefore(toolbar, svg);
+      }
+    });
+  }
 
   function setupCanvas(canvas) {
     const ctx = canvas.getContext("2d");
@@ -552,11 +1015,14 @@ G3,4.0,4.3,4.2</pre>
     return { min: niceMin, max: niceMax, step };
   }
 
-  function drawBarChart(canvas, labels, values, { title } = {}) {
+  function drawBarChart(canvas, labels, values, opts = {}) {
+    applyChartThemeFromStorage();
+    const title = opts.title;
+    const multiColor = opts.multiColor !== undefined ? opts.multiColor : chartBarsMultiColor();
     const { ctx, w, h } = setupCanvas(canvas);
     const padL = 62;
     const padR = 18;
-    const padT = title ? 38 : 24;
+    const padT = title ? 42 : 26;
     const padB = 62;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
@@ -572,18 +1038,19 @@ G3,4.0,4.3,4.2</pre>
     const scaleY = plotH / (max - min);
     const n = Math.max(1, values.length);
     const barSlot = plotW / n;
-    const barW = Math.max(8, Math.min(48, barSlot - 10));
+    const barW = Math.max(10, Math.min(52, barSlot - 10));
 
     ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
+    fillPlotBackground(ctx, padL, plotTop, plotW, plotH);
 
     ctx.strokeStyle = CHART.frame;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.2;
     ctx.strokeRect(padL + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.font = "700 16px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
@@ -599,14 +1066,14 @@ G3,4.0,4.3,4.2</pre>
       ctx.stroke();
       const val = min + (max - min) * t;
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 12px Segoe UI, Arial, sans-serif";
+      ctx.font = "600 12px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       ctx.fillText(formatChartTick(val), padL - 8, y);
     }
 
     ctx.strokeStyle = CHART.axis;
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(padL, plotBottom);
     ctx.lineTo(padL + plotW, plotBottom);
@@ -619,19 +1086,16 @@ G3,4.0,4.3,4.2</pre>
       const bh = (v - min) * scaleY;
       const y = plotBottom - bh;
 
-      const grad = ctx.createLinearGradient(x, y, x + barW, plotBottom);
-      grad.addColorStop(0, CHART.bar0);
-      grad.addColorStop(1, CHART.bar1);
-      ctx.fillStyle = grad;
-      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
+      ctx.fillStyle = barFillGradient(ctx, x, y, barW, bh, i, multiColor);
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.18)";
       ctx.lineWidth = 1;
-      roundRect(ctx, x, y, barW, bh, 8);
+      roundRect(ctx, x, y, barW, bh, 10);
       ctx.fill();
       ctx.stroke();
 
       if (bh > 18) {
-        ctx.fillStyle = "#fff";
-        ctx.font = "700 11px Segoe UI, Arial, sans-serif";
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.font = "700 11px Segoe UI, system-ui, Arial, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         ctx.fillText(formatChartTick(v), cx, y - 4);
@@ -639,7 +1103,7 @@ G3,4.0,4.3,4.2</pre>
 
       const lbl = String(labels[i] ?? "");
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+      ctx.font = "600 11px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.save();
@@ -651,12 +1115,15 @@ G3,4.0,4.3,4.2</pre>
   }
 
   /** Bar chart of means with vertical error bars at ±SEm (for RBD/mean plots). */
-  function drawBarChartWithErrorBars(canvas, labels, values, sems, { title } = {}) {
+  function drawBarChartWithErrorBars(canvas, labels, values, sems, opts = {}) {
+    applyChartThemeFromStorage();
+    const title = opts.title;
+    const multiColor = opts.multiColor !== undefined ? opts.multiColor : chartBarsMultiColor();
     const sem = sems && sems.length === values.length ? sems : values.map(() => 0);
     const { ctx, w, h } = setupCanvas(canvas);
     const padL = 62;
     const padR = 18;
-    const padT = title ? 38 : 24;
+    const padT = title ? 42 : 26;
     const padB = 62;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
@@ -675,18 +1142,19 @@ G3,4.0,4.3,4.2</pre>
     const scaleY = plotH / range;
     const n = Math.max(1, values.length);
     const barSlot = plotW / n;
-    const barW = Math.max(8, Math.min(48, barSlot - 10));
+    const barW = Math.max(10, Math.min(52, barSlot - 10));
 
     ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
+    fillPlotBackground(ctx, padL, plotTop, plotW, plotH);
 
     ctx.strokeStyle = CHART.frame;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.2;
     ctx.strokeRect(padL + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.font = "700 16px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
@@ -702,20 +1170,21 @@ G3,4.0,4.3,4.2</pre>
       ctx.stroke();
       const val = min + (max - min) * t;
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 12px Segoe UI, Arial, sans-serif";
+      ctx.font = "600 12px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       ctx.fillText(formatChartTick(val), padL - 8, y);
     }
 
     ctx.strokeStyle = CHART.axis;
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(padL, plotBottom);
     ctx.lineTo(padL + plotW, plotBottom);
     ctx.stroke();
 
     const gy = (yv) => plotBottom - ((yv - min) / range) * plotH;
+    const errColor = CHART.inkMuted || "#475569";
 
     for (let i = 0; i < values.length; i++) {
       const v = values[i];
@@ -724,20 +1193,17 @@ G3,4.0,4.3,4.2</pre>
       const bh = (v - min) * scaleY;
       const y = plotBottom - bh;
 
-      const grad = ctx.createLinearGradient(x, y, x + barW, plotBottom);
-      grad.addColorStop(0, CHART.bar0);
-      grad.addColorStop(1, CHART.bar1);
-      ctx.fillStyle = grad;
-      ctx.strokeStyle = "rgba(15, 23, 42, 0.22)";
+      ctx.fillStyle = barFillGradient(ctx, x, y, barW, bh, i, multiColor);
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.18)";
       ctx.lineWidth = 1;
-      roundRect(ctx, x, y, barW, bh, 8);
+      roundRect(ctx, x, y, barW, bh, 10);
       ctx.fill();
       ctx.stroke();
 
       const cap = 5;
       const yLo = gy(v - sem[i]);
       const yHi = gy(v + sem[i]);
-      ctx.strokeStyle = "#475569";
+      ctx.strokeStyle = errColor;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(cx, yLo);
@@ -751,8 +1217,8 @@ G3,4.0,4.3,4.2</pre>
       ctx.stroke();
 
       if (bh > 18) {
-        ctx.fillStyle = "#fff";
-        ctx.font = "700 11px Segoe UI, Arial, sans-serif";
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.font = "700 11px Segoe UI, system-ui, Arial, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         ctx.fillText(formatChartTick(v), cx, y - 4);
@@ -760,7 +1226,7 @@ G3,4.0,4.3,4.2</pre>
 
       const lbl = String(labels[i] ?? "");
       ctx.fillStyle = CHART.inkMuted;
-      ctx.font = "600 11px Segoe UI, Arial, sans-serif";
+      ctx.font = "600 11px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.save();
@@ -783,10 +1249,11 @@ G3,4.0,4.3,4.2</pre>
   }
 
   function drawScatterPlot(canvas, points, { title, xLabel, yLabel } = {}) {
+    applyChartThemeFromStorage();
     const { ctx, w, h } = setupCanvas(canvas);
     const padL = 62;
     const padR = 22;
-    const padT = title ? 38 : 24;
+    const padT = title ? 40 : 26;
     const padB = 52;
     const xs = points.map((p) => p.x);
     const ys = points.map((p) => p.y);
@@ -809,16 +1276,17 @@ G3,4.0,4.3,4.2</pre>
 
     ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
+    fillPlotBackground(ctx, plotLeft, plotTop, plotW, plotH);
 
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.font = "700 16px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
 
     ctx.strokeStyle = CHART.frame;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.2;
     ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
     const grid = 6;
@@ -896,10 +1364,11 @@ G3,4.0,4.3,4.2</pre>
 
   /** PCA biplot: observation scores (PC1 vs PC2) + variable loading vectors (scaled for visibility). */
   function drawPcaBiplot(canvas, scores12, loadings12, varNames, { title } = {}) {
+    applyChartThemeFromStorage();
     const { ctx, w, h } = setupCanvas(canvas);
     const padL = 62;
     const padR = 22;
-    const padT = title ? 38 : 24;
+    const padT = title ? 40 : 26;
     const padB = 52;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
@@ -934,14 +1403,15 @@ G3,4.0,4.3,4.2</pre>
 
     ctx.fillStyle = CHART.bg;
     ctx.fillRect(0, 0, w, h);
+    fillPlotBackground(ctx, plotLeft, plotTop, plotW, plotH);
     if (title) {
       ctx.fillStyle = CHART.ink;
-      ctx.font = "700 15px Segoe UI, Arial, sans-serif";
+      ctx.font = "700 16px Segoe UI, system-ui, Arial, sans-serif";
       ctx.textBaseline = "top";
       ctx.fillText(title, padL, 8);
     }
     ctx.strokeStyle = CHART.frame;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.2;
     ctx.strokeRect(plotLeft + 0.5, plotTop + 0.5, plotW - 1, plotH - 1);
 
     const ox = gx(0);
@@ -3160,7 +3630,7 @@ G3,4.0,4.3,4.2</pre>
       <div class="box" role="dialog" aria-modal="true" aria-label="Report metadata">
         <header>
           <div>
-            <h3>Report metadata (included in DOC/XLS downloads)</h3>
+            <h3>Report metadata (included in Word .mht / XLS downloads)</h3>
             <div class="muted small" style="margin-top:4px">Saved locally on this computer (offline). You can update anytime.</div>
           </div>
           <button class="close" type="button">Close</button>
@@ -3601,23 +4071,43 @@ G3,4.0,4.3,4.2</pre>
 
   function moduleShell({ moduleId, title, subtitle, bodyHtml, payloadForPrevComparison, prevCompareKeys = [] }) {
     const exportRow = `
-      <div class="actions" style="margin-top:12px">
-        <button class="action-btn primary2" type="button" data-export="full">Export Full Report</button>
-        <button class="action-btn primary2" type="button" data-export="doc">Download DOC</button>
-        <button class="action-btn primary2" type="button" data-export="xls">Download XLS</button>
-        <button class="action-btn" type="button" data-export="print">Print</button>
-        <button class="action-btn" type="button" data-project="save">Save project</button>
-        <button class="action-btn" type="button" data-project="load">Load project</button>
-        <button class="action-btn" type="button" data-project="manage">Manage projects</button>
-        <button class="action-btn" type="button" data-project="export">Export projects JSON</button>
-        <button class="action-btn" type="button" data-project="import">Import projects JSON</button>
-        <button class="action-btn" type="button" data-run="selected">Run selected analyses</button>
-        <button class="action-btn" type="button" data-run="force">${FORCE_RUN_MODE ? "Force run: ON" : "Force run: OFF"}</button>
-        <button class="action-btn" type="button" data-run="strict">${STRICT_MODE ? "Strict mode: ON" : "Strict mode: OFF"}</button>
+      <div class="results-toolbar" role="region" aria-label="Export, project, and run options">
+        <div class="results-toolbar__group">
+          <span class="results-toolbar__label">Report</span>
+          <div class="results-toolbar__buttons">
+            <button class="action-btn primary2" type="button" data-export="full">Export Full Report</button>
+            <button class="action-btn primary2" type="button" data-export="doc" title="Word: opens .mht with figures embedded (CID parts)">Download Word (.mht)</button>
+            <button class="action-btn primary2" type="button" data-export="xls">Download XLS</button>
+            <button class="action-btn" type="button" data-export="print">Print</button>
+          </div>
+        </div>
+        <div class="results-toolbar__group">
+          <span class="results-toolbar__label">Project</span>
+          <div class="results-toolbar__buttons">
+            <button class="action-btn" type="button" data-project="save">Save project</button>
+            <button class="action-btn" type="button" data-project="load">Load project</button>
+            <button class="action-btn" type="button" data-project="manage">Manage projects</button>
+            <button class="action-btn" type="button" data-project="export">Export projects JSON</button>
+            <button class="action-btn" type="button" data-project="import">Import projects JSON</button>
+          </div>
+        </div>
+        <div class="results-toolbar__group">
+          <span class="results-toolbar__label">Batch</span>
+          <div class="results-toolbar__buttons">
+            <button class="action-btn" type="button" data-run="selected">Run selected analyses</button>
+            <button class="action-btn" type="button" data-run="force">${FORCE_RUN_MODE ? "Force run: ON" : "Force run: OFF"}</button>
+            <button class="action-btn" type="button" data-run="strict">${STRICT_MODE ? "Strict mode: ON" : "Strict mode: OFF"}</button>
+          </div>
+        </div>
       </div>
     `;
 
-    const exportInterpretationEl = `<div class="export-interpretation" style="margin-top:12px"></div>`;
+    const exportInterpretationEl = `
+      <div class="results-interpretation">
+        <h4 class="results-interpretation__title">Interpretation</h4>
+        <div class="export-interpretation results-interpretation__body"></div>
+      </div>
+    `;
 
     $("#contentBody").innerHTML = `
       <div class="section">
@@ -3628,6 +4118,8 @@ G3,4.0,4.3,4.2</pre>
         <div class="utility-panel-host" style="margin-top:12px"></div>
       </div>
     `;
+
+    $$("#contentBody [id$='TableWrap']").forEach((el) => el.classList.add("results-stack"));
 
     CURRENT_MODULE_ID = moduleId;
     highlightSidebarModule(moduleId);
@@ -3747,6 +4239,7 @@ G3,4.0,4.3,4.2</pre>
     // standardize table captions for consistent report layout
     injectSessionUploadBanner(moduleId);
     applyStandardTableCaptions("#contentBody");
+    initChartPanels("#contentBody");
 
     return { prevComparison: deviationBanner(moduleId, payloadForPrevComparison?.storePrev || {}, prevCompareKeys) };
   }
@@ -3784,6 +4277,16 @@ G3,4.0,4.3,4.2</pre>
           <div class="section" style="margin:0">
             <h4>Input grid</h4>
             <div class="muted small" style="margin-bottom:8px">Treatments (rows T1..T<sub>t</sub>), replicates (columns up to R<sub>max</sub>). Leave a cell empty to omit that replicate — unequal n is allowed. Each treatment needs ≥1 value; total N must exceed t for error df.</div>
+            <div class="bkq-data-upload-panel">
+              <div class="bkq-data-upload-panel__title">Upload data</div>
+              <div class="muted small" style="margin-bottom:10px">
+                <strong>CSV / Excel:</strong> optional first column (T1, T2, …); remaining columns = replicate yields. Or omit labels — all cells numeric (rows = treatments, columns = reps). First Excel sheet only.
+              </div>
+              <div class="actions">
+                <button class="action-btn primary2" type="button" id="crdImportCsv">Import CSV / Excel</button>
+              </div>
+              <input type="file" id="crdCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <div class="input-grid" id="crdControls">
               <div class="two-col">
                 <label>
@@ -3867,6 +4370,23 @@ G3,4.0,4.3,4.2</pre>
       const t = Math.max(2, Number($("#crdT").value || defaultT));
       const r = Math.max(2, Number($("#crdR").value || defaultR));
       buildGrid(t, r);
+    });
+
+    bindCsvExcelFileImport("crdImportCsv", "crdCsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      if (!parsed || parsed.t < 2 || parsed.r < 2) {
+        alert("Could not parse grid: need at least 2 treatment rows and 2 replicate columns. Optional text labels in the first column.");
+        return;
+      }
+      $("#crdT").value = String(parsed.t);
+      $("#crdR").value = String(parsed.r);
+      buildGrid(parsed.t, parsed.r);
+      for (let i = 0; i < parsed.t; i++) {
+        for (let j = 0; j < parsed.r; j++) {
+          const inp = document.querySelector(`#crdGridWrap input[data-cell="t${i}r${j}"]`);
+          if (inp) inp.value = String(parsed.matrix[i][j]);
+        }
+      }
     });
 
     $("#crdCompute").addEventListener("click", () => {
@@ -4068,6 +4588,16 @@ G3,4.0,4.3,4.2</pre>
           <div class="section" style="margin:0">
             <h4>Input grid</h4>
             <div class="muted small" style="margin-bottom:8px">Rows = treatments, columns = blocks (replications). Total SS is partitioned into <strong>Treatments</strong>, <strong>Replication (blocks)</strong>, and <strong>Experimental error</strong>.</div>
+            <div class="bkq-data-upload-panel">
+              <div class="bkq-data-upload-panel__title">Upload data</div>
+              <div class="muted small" style="margin-bottom:10px">
+                <strong>CSV / Excel:</strong> optional first column for treatment IDs; other columns = <strong>blocks</strong> (replicates). Or all-numeric rows (treatments × blocks). First Excel sheet only.
+              </div>
+              <div class="actions">
+                <button class="action-btn primary2" type="button" id="rbdImportCsv">Import CSV / Excel</button>
+              </div>
+              <input type="file" id="rbdCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <div class="input-grid" id="rbdControls">
               <div class="two-col">
                 <label>
@@ -4149,6 +4679,23 @@ G3,4.0,4.3,4.2</pre>
       const t = Math.max(2, Number($("#rbdT").value || defaultT));
       const b = Math.max(2, Number($("#rbdB").value || defaultB));
       buildGrid(t, b);
+    });
+
+    bindCsvExcelFileImport("rbdImportCsv", "rbdCsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      if (!parsed || parsed.t < 2 || parsed.r < 2) {
+        alert("Could not parse grid: need at least 2 treatment rows and 2 block columns. Optional label column on the left.");
+        return;
+      }
+      $("#rbdT").value = String(parsed.t);
+      $("#rbdB").value = String(parsed.r);
+      buildGrid(parsed.t, parsed.r);
+      for (let i = 0; i < parsed.t; i++) {
+        for (let j = 0; j < parsed.r; j++) {
+          const inp = document.querySelector(`#rbdGridWrap input[data-cell="t${i}b${j}"]`);
+          if (inp) inp.value = String(parsed.matrix[i][j]);
+        }
+      }
     });
 
     $("#rbdCompute").addEventListener("click", () => {
@@ -4641,6 +5188,11 @@ G3,4.0,4.3,4.2</pre>
               <div class="note" style="margin:0">
                 Layout: each row is a treatment combination (A<sub>i</sub>B<sub>j</sub>), columns are blocks (R1..Rr).
               </div>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> set <strong>a</strong>, <strong>b</strong>, <strong>r</strong> and click <strong>Build grid</strong> first. File = <strong>a×b</strong> rows (same order as the table: A₁B₁ … AₐB_b) and <strong>r</strong> numeric columns; optional label column before R1…Rr.
+              </div>
+              <button class="action-btn" type="button" id="factImportCsv">Import CSV / Excel</button>
+              <input type="file" id="factCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="factGridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -4707,6 +5259,25 @@ G3,4.0,4.3,4.2</pre>
       const b = Math.max(2, Number($("#factB").value || defaultB));
       const r = Math.max(2, Number($("#factR").value || defaultR));
       buildGrid(a, b, r);
+    });
+
+    bindCsvExcelFileImport("factImportCsv", "factCsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      const a = Math.max(2, Number($("#factA").value || defaultA));
+      const b = Math.max(2, Number($("#factB").value || defaultB));
+      const r = Math.max(2, Number($("#factR").value || defaultR));
+      if (!parsed || parsed.t !== a * b || parsed.r !== r) {
+        alert(`Grid shape mismatch: file has ${parsed ? `${parsed.t} rows × ${parsed.r} cols` : "invalid data"} but current design needs ${a * b} rows × ${r} cols. Set a, b, r and Build grid first.`);
+        return;
+      }
+      for (let idx = 0; idx < a * b; idx++) {
+        const i = Math.floor(idx / b);
+        const j = idx % b;
+        for (let k = 0; k < r; k++) {
+          const inp = document.querySelector(`#factGridWrap input[data-cell="a${i}b${j}r${k}"]`);
+          if (inp) inp.value = String(parsed.matrix[idx][k]);
+        }
+      }
     });
 
     $("#factCompute").addEventListener("click", () => {
@@ -5028,6 +5599,11 @@ G3,4.0,4.3,4.2</pre>
               <label>Levels of C (c) <input type="number" min="2" id="fact3C" value="${defaultC}" /></label>
               <label>Blocks / replications (r) <input type="number" min="2" id="fact3R" value="${defaultR}" /></label>
               <button class="action-btn primary2" type="button" id="fact3Build">Build grid</button>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> set <strong>a</strong>, <strong>b</strong>, <strong>c</strong>, <strong>r</strong> and click <strong>Build grid</strong> first. File = <strong>a×b×c</strong> rows (order A₁B₁C₁ … AₐB_bC_c) and <strong>r</strong> numeric columns; optional label column.
+              </div>
+              <button class="action-btn" type="button" id="fact3ImportCsv">Import CSV / Excel</button>
+              <input type="file" id="fact3CsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="fact3GridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -5091,6 +5667,29 @@ G3,4.0,4.3,4.2</pre>
       const c0 = Math.max(2, Number($("#fact3C").value || defaultC));
       const r0 = Math.max(2, Number($("#fact3R").value || defaultR));
       buildGrid3(a0, b0, c0, r0);
+    });
+
+    bindCsvExcelFileImport("fact3ImportCsv", "fact3CsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      const a = Math.max(2, Number($("#fact3A").value || defaultA));
+      const b = Math.max(2, Number($("#fact3B").value || defaultB));
+      const c = Math.max(2, Number($("#fact3C").value || defaultC));
+      const r = Math.max(2, Number($("#fact3R").value || defaultR));
+      const cells = a * b * c;
+      if (!parsed || parsed.t !== cells || parsed.r !== r) {
+        alert(`Grid shape mismatch: file has ${parsed ? `${parsed.t} rows × ${parsed.r} cols` : "invalid data"} but current design needs ${cells} rows × ${r} cols. Set a, b, c, r and Build grid first.`);
+        return;
+      }
+      for (let idx = 0; idx < cells; idx++) {
+        const rem = idx % (b * c);
+        const i = Math.floor(idx / (b * c));
+        const j = Math.floor(rem / c);
+        const k = rem % c;
+        for (let rep = 0; rep < r; rep++) {
+          const inp = document.querySelector(`#fact3GridWrap input[data-cell3="a${i}b${j}c${k}r${rep}"]`);
+          if (inp) inp.value = String(parsed.matrix[idx][rep]);
+        }
+      }
     });
 
     $("#fact3Compute").addEventListener("click", () => {
@@ -5319,6 +5918,11 @@ G3,4.0,4.3,4.2</pre>
               <div class="note" style="margin:0">
                 Note: In Latin square, each treatment appears exactly once per row and once per column.
               </div>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> set <strong>t</strong> and click <strong>Build square</strong> first. File = <strong>t</strong> rows × <strong>t</strong> numeric columns (responses in row/column order); optional row label column.
+              </div>
+              <button class="action-btn" type="button" id="lsImportCsv">Import CSV / Excel</button>
+              <input type="file" id="lsCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="lsGridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -5401,6 +6005,21 @@ G3,4.0,4.3,4.2</pre>
     $("#lsBuild").addEventListener("click", () => {
       const t = Math.max(3, Math.min(10, Number($("#lsT").value || defaultT)));
       buildSquare(t);
+    });
+
+    bindCsvExcelFileImport("lsImportCsv", "lsCsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      const t = Math.max(3, Math.min(10, Number($("#lsT").value || defaultT)));
+      if (!parsed || parsed.t !== t || parsed.r !== t) {
+        alert(`Need a ${t}×${t} numeric grid (same rows as columns). Optional label column. Set t and Build square first.`);
+        return;
+      }
+      for (let i = 0; i < t; i++) {
+        for (let j = 0; j < t; j++) {
+          const inp = document.querySelector(`#lsGridWrap input[data-cell="r${i}c${j}"]`);
+          if (inp) inp.value = String(parsed.matrix[i][j]);
+        }
+      }
     });
 
     $("#lsCompute").addEventListener("click", () => {
@@ -5816,6 +6435,11 @@ G3,4.0,4.3,4.2</pre>
               <div class="note" style="margin:0">
                 Each block contains a main-plot layout of A; within each A main plot, B subplots are observed.
               </div>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> set <strong>a</strong>, <strong>b</strong>, <strong>r</strong> and click <strong>Build grid</strong> first. File = <strong>a×b</strong> rows (A×B combinations in table order) and <strong>r</strong> columns; optional label column.
+              </div>
+              <button class="action-btn" type="button" id="spImportCsv">Import CSV / Excel</button>
+              <input type="file" id="spCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="spGridWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -5881,6 +6505,25 @@ G3,4.0,4.3,4.2</pre>
       const b = Math.max(2, Number($("#spB").value || defaultB));
       const r = Math.max(2, Number($("#spR").value || defaultR));
       buildGrid(a, b, r);
+    });
+
+    bindCsvExcelFileImport("spImportCsv", "spCsvFile", (txt) => {
+      const parsed = parseRectDataGridCsv(txt);
+      const a = Math.max(2, Number($("#spA").value || defaultA));
+      const b = Math.max(2, Number($("#spB").value || defaultB));
+      const r = Math.max(2, Number($("#spR").value || defaultR));
+      if (!parsed || parsed.t !== a * b || parsed.r !== r) {
+        alert(`Grid shape mismatch: file has ${parsed ? `${parsed.t} rows × ${parsed.r} cols` : "invalid data"} but current design needs ${a * b} rows × ${r} cols. Set a, b, r and Build grid first.`);
+        return;
+      }
+      for (let idx = 0; idx < a * b; idx++) {
+        const i = Math.floor(idx / b);
+        const j = idx % b;
+        for (let k = 0; k < r; k++) {
+          const inp = document.querySelector(`#spGridWrap input[data-cell="a${i}b${j}r${k}"]`);
+          if (inp) inp.value = String(parsed.matrix[idx][k]);
+        }
+      }
     });
 
     $("#spCompute").addEventListener("click", () => {
@@ -6072,7 +6715,12 @@ G3,4.0,4.3,4.2</pre>
               <textarea id="corMatrix" rows="5" placeholder="Rows = observations, columns = traits (comma or tab). Needs ≥3 rows and ≥2 columns. Example:&#10;10.2, 8.1, 12.0&#10;11.0, 8.4, 11.5&#10;9.8, 7.9, 12.2"></textarea>
             </label>
             <div class="muted small" style="margin-bottom:8px">When the matrix is filled, a full Pearson correlation matrix is shown below; X/Y still drive the scatter plot.</div>
-            <div class="actions" style="margin-top:12px">
+            <div class="muted small" style="margin-bottom:8px">
+              <strong>Import CSV / Excel:</strong> ≥3 rows and ≥3 columns → fills the <strong>multi-trait matrix</strong>. Exactly <strong>2 numeric columns</strong> (optional header) → fills X and Y lists and the matrix.
+            </div>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="corImportCsv">Import CSV / Excel</button>
+              <input type="file" id="corCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
               <button class="action-btn primary2" type="button" id="corCompute">Compute correlations</button>
             </div>
           </div>
@@ -6197,6 +6845,41 @@ G3,4.0,4.3,4.2</pre>
       setRunMeta("correlation", { forceRun: isForceRunEnabled(), inputSize: `n=${n}`, standardization: "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${qCorr} / 100` });
     });
 
+    bindCsvExcelFileImport("corImportCsv", "corCsvFile", (txt) => {
+      const rows = parseCsv(txt)
+        .map((r) => r.map((c) => String(c).trim()))
+        .filter((r) => r.some((c) => c !== ""));
+      if (rows.length < 2) {
+        alert("Need at least 2 data rows.");
+        return;
+      }
+      const w = Math.max(...rows.map((r) => r.length));
+      if (w >= 3) {
+        $("#corMatrix").value = txt;
+      } else if (w === 2) {
+        let start = 0;
+        const a = Number(rows[0][0]);
+        const b = Number(rows[0][1]);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) start = 1;
+        const xs = [];
+        const ys = [];
+        for (let i = start; i < rows.length; i++) {
+          if (rows[i].length < 2) continue;
+          xs.push(Number(rows[i][0]));
+          ys.push(Number(rows[i][1]));
+        }
+        if (xs.length < 3) {
+          alert("Need at least 3 numeric pairs in two columns.");
+          return;
+        }
+        $("#corX").value = xs.join(", ");
+        $("#corY").value = ys.join(", ");
+        $("#corMatrix").value = txt;
+      } else {
+        alert("File needs either 2 columns (X,Y) or 3+ columns (trait matrix).");
+      }
+    });
+
     // compute once for initial display
     $("#corCompute").click();
   }
@@ -6224,7 +6907,12 @@ G3,4.0,4.3,4.2</pre>
               Response Y
               <textarea id="regY">${Array.from({ length: defaultN }, (_, i) => (9 + i * 2.1 + (i % 3 === 0 ? 3.1 : 1.2)).toFixed(2)).join(", ")}</textarea>
             </label>
-            <div class="actions" style="margin-top:12px">
+            <div class="muted small" style="margin-top:8px">
+              <strong>Import CSV / Excel:</strong> two columns — predictor X then response Y (header row optional). Needs ≥3 rows.
+            </div>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="regImportCsv">Import CSV / Excel</button>
+              <input type="file" id="regCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
               <button class="action-btn primary2" type="button" id="regCompute">Compute regression</button>
             </div>
           </div>
@@ -6357,6 +7045,33 @@ G3,4.0,4.3,4.2</pre>
       setRunMeta("regression", { forceRun: isForceRunEnabled(), inputSize: `n=${n}`, standardization: "none", preprocessing: xs.length === ys.length ? "No truncation." : `Input lengths differed (X=${xs.length}, Y=${ys.length}); truncated to n=${n}.`, qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsReg.map((x) => x.pass ? 100 : 45)))))} / 100` });
     });
 
+    bindCsvExcelFileImport("regImportCsv", "regCsvFile", (txt) => {
+      const rows = parseCsv(txt)
+        .map((r) => r.map((c) => String(c).trim()))
+        .filter((r) => r.some((c) => c !== ""));
+      if (rows.length < 2) {
+        alert("Need at least 2 rows.");
+        return;
+      }
+      let start = 0;
+      const a = Number(rows[0][0]);
+      const b = Number(rows[0][1]);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) start = 1;
+      const xs = [];
+      const ys = [];
+      for (let i = start; i < rows.length; i++) {
+        if (rows[i].length < 2) continue;
+        xs.push(Number(rows[i][0]));
+        ys.push(Number(rows[i][1]));
+      }
+      if (xs.length < 3 || ys.length < 3) {
+        alert("Need at least 3 numeric X,Y pairs.");
+        return;
+      }
+      $("#regX").value = xs.join(", ");
+      $("#regY").value = ys.join(", ");
+    });
+
     $("#regCompute").click();
   }
 
@@ -6397,6 +7112,13 @@ G3,4.0,4.3,4.2</pre>
               Data
               <textarea id="mlrData" rows="14" style="width:100%;font-family:ui-monospace,monospace;font-size:12px">${sampleMlr}</textarea>
             </label>
+            <div class="muted small" style="margin-top:8px">
+              <strong>Import CSV / Excel:</strong> same layout as the box above — header row + numeric rows (last column can be response after you pick Y).
+            </div>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="mlrImportCsv">Import CSV / Excel</button>
+              <input type="file" id="mlrCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <div class="input-grid" style="margin-top:10px">
               <label>
                 Response (Y)
@@ -6630,6 +7352,8 @@ G3,4.0,4.3,4.2</pre>
       });
     });
 
+    bindCsvExcelToTextarea("mlrImportCsv", "mlrCsvFile", "mlrData");
+
     $("#mlrCompute").click();
   }
 
@@ -6672,6 +7396,13 @@ G3,4.0,4.3,4.2</pre>
               Data matrix
               <textarea id="pcaMatrix" rows="14" style="min-height:220px;font-family:ui-monospace,monospace">${defaultCsv}</textarea>
             </label>
+            <div class="muted small" style="margin-top:8px">
+              <strong>Import CSV / Excel:</strong> rows = observations, columns = variables (same as pasted matrix). Optional header row with variable names — also paste names into the field above if needed.
+            </div>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="pcaImportCsv">Import CSV / Excel</button>
+              <input type="file" id="pcaCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <p class="note" style="margin:0">Analysis uses <strong>correlation PCA</strong>: each column is centered and scaled to <strong>unit variance</strong> before extracting components.</p>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="pcaCompute">Compute PCA</button>
@@ -6797,6 +7528,8 @@ G3,4.0,4.3,4.2</pre>
         qualityScore: `${Math.max(0, Math.min(100, Math.round(mean(qItemsPCA.map((x) => (x.pass ? 100 : 45))))))} / 100`,
       });
     };
+
+    bindCsvExcelToTextarea("pcaImportCsv", "pcaCsvFile", "pcaMatrix");
 
     $("#pcaCompute").click();
   }
@@ -7098,6 +7831,11 @@ G4,1.12,35.8,2.22,11.7`;
               Data
               <textarea id="cpaData" rows="14" style="width:100%;font-family:ui-monospace,monospace;font-size:12px">${sampleCPA}</textarea>
             </label>
+            <div class="muted small" style="margin-top:8px">
+              <strong>Import CSV / Excel:</strong> same layout as the box (optional Genotype column + trait columns). First sheet only for Excel.
+            </div>
+            <button class="action-btn" type="button" id="cpaImportCsv" style="margin-top:6px">Import CSV / Excel</button>
+            <input type="file" id="cpaCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             <div class="input-grid" style="margin-top:10px">
               <label>
                 Target trait (Y)
@@ -7149,6 +7887,8 @@ G4,1.12,35.8,2.22,11.7`;
       payloadForPrevComparison: { interpretation: "", storePrev: null },
       prevCompareKeys: ["residual"],
     });
+
+    bindCsvExcelToTextarea("cpaImportCsv", "cpaCsvFile", "cpaData");
 
     function correlationPairTables(R, Pv, names, nObs, labelR, labelP) {
       const hdr = ["Trait", ...names];
@@ -9380,6 +10120,11 @@ G4,1.12,35.8,2.22,11.7`;
               <div class="note" style="margin:0">
                 Enter line means for crosses with testers L1, L2 and L3.
               </div>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> columns <strong>Line</strong> (optional), <strong>L1</strong>, <strong>L2</strong>, <strong>L3</strong> numeric means — one row per line. Row count sets the number of lines (4–30).
+              </div>
+              <button class="action-btn" type="button" id="ttcImportCsv">Import CSV / Excel</button>
+              <input type="file" id="ttcCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="ttcWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -9434,6 +10179,43 @@ G4,1.12,35.8,2.22,11.7`;
     $("#ttcBuild").addEventListener("click", () => {
       const n = Math.max(4, Math.min(30, Number($("#ttcN").value || defaultN)));
       buildTable(n);
+    });
+
+    bindCsvExcelFileImport("ttcImportCsv", "ttcCsvFile", (txt) => {
+      const rows = parseCsv(txt).filter((r) => r.some((c) => String(c).trim() !== ""));
+      if (rows.length < 2) {
+        alert("Need a header row and at least one data row.");
+        return;
+      }
+      const head = rows[0].map((c) => String(c).trim().toLowerCase());
+      const dataRows = rows.slice(1);
+      let i1 = 1;
+      let i2 = 2;
+      let i3 = 3;
+      if (head.some((h) => h === "l1" || h.includes("l1"))) {
+        const find = (pred) => head.findIndex(pred);
+        i1 = find((h) => h === "l1" || h.endsWith("l1"));
+        i2 = find((h) => h === "l2" || h.endsWith("l2"));
+        i3 = find((h) => h === "l3" || h.endsWith("l3"));
+        if (i1 < 0) i1 = 1;
+        if (i2 < 0) i2 = 2;
+        if (i3 < 0) i3 = 3;
+      }
+      const n = Math.max(4, Math.min(30, dataRows.length));
+      $("#ttcN").value = String(n);
+      buildTable(n);
+      for (let i = 0; i < n; i++) {
+        const row = dataRows[i] || [];
+        const l1 = Number(row[i1] ?? row[1]) || 0;
+        const l2 = Number(row[i2] ?? row[2]) || 0;
+        const l3 = Number(row[i3] ?? row[3]) || 0;
+        const a = document.querySelector(`#ttcWrap input[data-ttc="i${i}a"]`);
+        const b = document.querySelector(`#ttcWrap input[data-ttc="i${i}b"]`);
+        const c = document.querySelector(`#ttcWrap input[data-ttc="i${i}c"]`);
+        if (a) a.value = String(l1);
+        if (b) b.value = String(l2);
+        if (c) c.value = String(l3);
+      }
     });
 
     $("#ttcCompute").addEventListener("click", () => {
@@ -9528,6 +10310,11 @@ G4,1.12,35.8,2.22,11.7`;
               <label>F2 <input type="number" step="0.01" id="gmaF2" value="22.30"/></label>
               <label>BC1 (F1 x P1) <input type="number" step="0.01" id="gmaBC1" value="21.40"/></label>
               <label>BC2 (F1 x P2) <input type="number" step="0.01" id="gmaBC2" value="24.80"/></label>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> one data row with six values in order P1, P2, F1, F2, BC1, BC2 — or a header row with those names.
+              </div>
+              <button class="action-btn" type="button" id="gmaImportCsv">Import CSV / Excel</button>
+              <input type="file" id="gmaCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
               <button class="action-btn primary2" type="button" id="gmaCompute">Compute generation means</button>
             </div>
           </div>
@@ -9550,6 +10337,32 @@ G4,1.12,35.8,2.22,11.7`;
       bodyHtml,
       payloadForPrevComparison: { interpretation: "", storePrev: null },
       prevCompareKeys: ["m", "d", "h"],
+    });
+
+    bindCsvExcelFileImport("gmaImportCsv", "gmaCsvFile", (txt) => {
+      const raw = parseCsv(txt).filter((r) => r.some((c) => String(c).trim() !== ""));
+      if (!raw.length) return;
+      const head = raw[0].map((c) => String(c).trim().toLowerCase());
+      const keys = ["p1", "p2", "f1", "f2", "bc1", "bc2"];
+      let vals;
+      if (keys.every((k) => head.includes(k))) {
+        const ix = keys.map((k) => head.indexOf(k));
+        const row = raw.length > 1 ? raw[1] : raw[0];
+        vals = ix.map((i) => Number(row[i]));
+      } else {
+        const row = raw[raw.length - 1].map((c) => Number(String(c).trim()));
+        vals = row.filter((x) => Number.isFinite(x));
+      }
+      if (vals.length < 6 || vals.slice(0, 6).some((x) => !Number.isFinite(x))) {
+        alert("Need six numeric generation means: P1, P2, F1, F2, BC1, BC2.");
+        return;
+      }
+      $("#gmaP1").value = String(vals[0]);
+      $("#gmaP2").value = String(vals[1]);
+      $("#gmaF1").value = String(vals[2]);
+      $("#gmaF2").value = String(vals[3]);
+      $("#gmaBC1").value = String(vals[4]);
+      $("#gmaBC2").value = String(vals[5]);
     });
 
     $("#gmaCompute").addEventListener("click", () => {
@@ -10751,6 +11564,179 @@ G4,1.12,35.8,2.22,11.7`;
     $("#faCompute").click();
   }
 
+  /** PCA (trait space): first k PCs of column-centered X; pure JS power iteration + deflation. */
+  function d2VecDot(a, b) {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+    return s;
+  }
+  function d2VecNorm(v) {
+    return Math.sqrt(d2VecDot(v, v));
+  }
+  function d2VecNormalize(v) {
+    const n = d2VecNorm(v);
+    if (n < 1e-15) return;
+    for (let i = 0; i < v.length; i++) v[i] /= n;
+  }
+  function d2MatVec(C, v) {
+    const p = C.length;
+    const out = Array(p).fill(0);
+    for (let i = 0; i < p; i++) for (let j = 0; j < v.length; j++) out[i] += C[i][j] * v[j];
+    return out;
+  }
+  function d2CovDeflate(C, lam, v) {
+    const p = C.length;
+    for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) C[a][b] -= lam * v[a] * v[b];
+  }
+  /** Returns { scores: n×3, varPct: [3] } for trait matrix X (n genotypes × p traits). */
+  function pcaTraitsTop3Scores(X) {
+    const n = X.length;
+    const p = X[0].length;
+    const mu = Array(p).fill(0);
+    for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) mu[j] += X[i][j];
+    for (let j = 0; j < p; j++) mu[j] /= n;
+    const Z = X.map((row) => row.map((v, j) => v - mu[j]));
+    const nf = Math.max(1, n - 1);
+    const C = Array.from({ length: p }, () => Array(p).fill(0));
+    for (let a = 0; a < p; a++) {
+      for (let b = 0; b < p; b++) {
+        let s = 0;
+        for (let i = 0; i < n; i++) s += Z[i][a] * Z[i][b];
+        C[a][b] = s / nf;
+      }
+    }
+    const Cwork = C.map((r) => r.slice());
+    const kMax = Math.min(3, p);
+    const evecs = [];
+    const evals = [];
+    for (let kk = 0; kk < kMax; kk++) {
+      const v = Array.from({ length: p }, (_, i) => Math.sin(i * 1.3 + kk * 2.1));
+      d2VecNormalize(v);
+      for (let it = 0; it < 140; it++) {
+        const w = d2MatVec(Cwork, v);
+        d2VecNormalize(w);
+        for (let i = 0; i < p; i++) v[i] = w[i];
+      }
+      const lam = Math.max(0, d2VecDot(v, d2MatVec(Cwork, v)));
+      evals.push(lam);
+      evecs.push(v.slice());
+      d2CovDeflate(Cwork, lam, v);
+    }
+    const trace = evals.reduce((a, b) => a + b, 0);
+    const varPct = evals.map((e) => (trace > 1e-12 ? (100 * e) / trace : 0));
+    const scores = Z.map((row) => {
+      const s = [];
+      for (let kk = 0; kk < kMax; kk++) s.push(d2VecDot(row, evecs[kk]));
+      while (s.length < 3) s.push(0);
+      return s;
+    });
+    return { scores, varPct };
+  }
+
+  function d2MeanDistanceToOthers(D2) {
+    const n = D2.length;
+    return Array.from({ length: n }, (_, i) => {
+      let s = 0;
+      let c = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        s += D2[i][j];
+        c++;
+      }
+      return c ? s / c : 0;
+    });
+  }
+
+  function renderD2PlotlyHeatmapAndPca3d(D2, names, Xuse) {
+    const heatEl = document.getElementById("d2PlotlyD2Heatmap");
+    const pcaEl = document.getElementById("d2PlotlyPca3d");
+    if (!heatEl || !pcaEl) return;
+    if (typeof Plotly === "undefined") {
+      heatEl.innerHTML = `<p class="muted small">Plotly failed to load — interactive D² / PCA figures unavailable.</p>`;
+      pcaEl.innerHTML = "";
+      return;
+    }
+    const dark = bkqPlotlyThemeIsDark();
+    const zText = D2.map((row) => row.map((v) => v.toFixed(2)));
+    const titleHeat = "<b>Mahalanobis D² distance matrix</b><br><sup>Complete pairwise divergence (matches numeric table)</sup>";
+    const layoutHeat = {
+      ...bkqPlotlyLayout(titleHeat, {
+        margin: { l: 112, r: 72, t: 96, b: 112 },
+        xaxis: { title: { text: "Genotypes" }, side: "bottom", tickangle: -40, automargin: true },
+        yaxis: { title: { text: "Genotypes" }, autorange: "reversed", automargin: true },
+      }),
+      height: 560,
+    };
+    Plotly.newPlot(
+      heatEl,
+      [
+        {
+          type: "heatmap",
+          z: D2,
+          x: names,
+          y: names,
+          colorscale: "RdYlBu_r",
+          text: zText,
+          texttemplate: "%{text}",
+          textfont: { size: 9 },
+          hoverongaps: false,
+          colorbar: { title: { text: "D²" }, outlinewidth: 0 },
+          hovertemplate: "Genotype %{x} vs %{y}<br>D²: %{z:.4f}<extra></extra>",
+        },
+      ],
+      layoutHeat,
+      bkqPlotlyConfig()
+    );
+
+    const { scores, varPct } = pcaTraitsTop3Scores(Xuse);
+    const avgD = d2MeanDistanceToOthers(D2);
+    const title3d = "<b>3D PCA of trait profiles</b><br><sup>Same trait matrix as D²; marker color = mean D² to others</sup>";
+    const layout3d = {
+      ...bkqPlotlyLayout(title3d, {
+        margin: { l: 0, r: 0, t: 96, b: 0 },
+        scene: {
+          xaxis: { title: `PC1 (${varPct[0]?.toFixed(1) ?? 0}% var.)` },
+          yaxis: { title: `PC2 (${varPct[1]?.toFixed(1) ?? 0}% var.)` },
+          zaxis: { title: `PC3 (${varPct[2]?.toFixed(1) ?? 0}% var.)` },
+          bgcolor: dark ? "#1e293b" : "#f1f5f9",
+        },
+        height: 520,
+      }),
+    };
+    Plotly.newPlot(
+      pcaEl,
+      [
+        {
+          type: "scatter3d",
+          mode: "markers+text",
+          x: scores.map((r) => r[0]),
+          y: scores.map((r) => r[1]),
+          z: scores.map((r) => r[2]),
+          text: names,
+          textposition: "top center",
+          marker: {
+            size: 10,
+            color: avgD,
+            colorscale: "Viridis",
+            colorbar: { title: { text: "Mean D²" }, outlinewidth: 0 },
+            opacity: 0.88,
+            line: { width: 2, color: dark ? "#e2e8f0" : "#0f172a" },
+          },
+          hovertemplate: "<b>%{text}</b><br>PC1: %{x:.3f}<br>PC2: %{y:.3f}<br>PC3: %{z:.3f}<extra></extra>",
+        },
+      ],
+      layout3d,
+      bkqPlotlyConfig()
+    );
+  }
+
+  function purgeD2PlotlyFigures() {
+    ["d2PlotlyD2Heatmap", "d2PlotlyPca3d"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && typeof Plotly !== "undefined" && Plotly.purge) Plotly.purge(el);
+    });
+  }
+
   // --- D2 Analysis with multiple clustering methods ---
   function renderD2Analysis() {
     const title = "D2 Analysis and Cluster Diagrams";
@@ -10829,6 +11815,26 @@ G4,1.12,35.8,2.22,11.7`;
             <div class="muted small" style="margin-top:4px">UPGMA on Mahalanobis distance D = √(D²); red line = cut height (%).</div>
             <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2DendroConsensusChart" style="width:100%;height:100%"></canvas></div>
             <div class="muted small" style="margin-top:4px">Consensus dendrogram (Ward on co-assignment dissimilarity 1 − S).</div>
+            <div class="chart" style="height:340px;margin-top:14px"><canvas id="d2D2HeatmapChart" style="width:100%;height:100%"></canvas></div>
+            <div class="muted small" style="margin-top:6px">Full Mahalanobis D² matrix (same values as Table 1 in the report).</div>
+            <div class="chart" style="height:260px;margin-top:12px"><canvas id="d2IntraInterBarChart" style="width:100%;height:100%"></canvas></div>
+            <div class="muted small" style="margin-top:4px">Intra-cluster mean D² vs mean inter-cluster D² for each consensus group (C1, C2, …).</div>
+            <h4 style="margin-top:18px;margin-bottom:8px">Interactive Plotly views</h4>
+            <div class="actions" style="margin:0 0 10px;flex-wrap:wrap;align-items:center;gap:10px">
+              <label class="muted small" style="display:flex;align-items:center;gap:8px;margin:0;font-weight:650">
+                Plotly theme
+                <select id="d2PlotlyTheme" aria-label="Plotly figure theme for D2 module" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+                  <option value="light">Light (print)</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <span class="muted small" style="line-height:1.45;max-width:42rem">Same setting as Biometric Report; your choice is saved in this browser.</span>
+            </div>
+            <p class="muted small" style="margin:0 0 8px">Zoom, pan, and download PNG from the mode bar. Same D² matrix as Table 1; 3D PCA uses the trait matrix (aligned with D² analysis).</p>
+            <div id="d2PlotlyD2Heatmap" class="plotly-chart js-plotly-plot" style="min-height:520px;margin-top:8px"></div>
+            <div class="muted small" style="margin-top:6px">Annotated heatmap: Mahalanobis D² between all genotype pairs.</div>
+            <div id="d2PlotlyPca3d" class="plotly-chart js-plotly-plot" style="min-height:520px;margin-top:16px"></div>
+            <div class="muted small" style="margin-top:6px">3D PCA of trait profiles; point color = mean pairwise D² to other genotypes (diversity context).</div>
             <div id="d2Tables" style="margin-top:12px"></div>
           </div>
         </div>
@@ -10858,7 +11864,9 @@ G4,1.12,35.8,2.22,11.7`;
           const v = 10 + i * 0.9 + j * 1.1 + ((i * (j + 1)) % 5) * 0.4;
           cells.push(`<td><input type="number" step="0.01" value="${v.toFixed(2)}" data-d2="g${i}t${j}" /></td>`);
         }
-        rows.push(`<tr><th>G${i + 1}</th>${cells.join("")}</tr>`);
+        rows.push(
+          `<tr><th style="padding:6px;min-width:88px"><input type="text" class="d2-name-input" value="${qs(`G${i + 1}`)}" data-d2-name="${i}" maxlength="48" title="Genotype label (shown on dendrogram &amp; plots)" style="width:100%;max-width:132px;padding:6px 8px;border-radius:8px;border:1px solid var(--border);font-size:13px" /></th>${cells.join("")}</tr>`
+        );
       }
       table.insertAdjacentHTML("beforeend", `<tbody>${rows.join("")}</tbody>`);
       wrap.appendChild(table);
@@ -10888,11 +11896,64 @@ G4,1.12,35.8,2.22,11.7`;
       const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
       const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
       const X = Array.from({ length: n }, () => Array(p).fill(0));
+      const names = [];
+      for (let i = 0; i < n; i++) {
+        const raw = document.querySelector(`#d2Wrap input[data-d2-name="${i}"]`)?.value ?? "";
+        const lab = String(raw).trim() || `G${i + 1}`;
+        names.push(lab.slice(0, 48));
+      }
       for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
         const v = Number(document.querySelector(`#d2Wrap input[data-d2="g${i}t${j}"]`)?.value ?? 0);
         X[i][j] = Number.isFinite(v) ? v : 0;
       }
-      return { n, p, X };
+      return { n, p, X, names };
+    }
+
+    /** CSV/Excel: optional first column genotype names; optional header row. */
+    function parseD2TraitImport(txt) {
+      const rows = parseCsv(txt).filter((r) => r.some((c) => String(c).trim() !== ""));
+      if (rows.length < 2) return null;
+      let start = 0;
+      const head0 = String(rows[0][0] ?? "").toLowerCase();
+      if (
+        head0.includes("trait") ||
+        head0.includes("genotype") ||
+        head0 === "name" ||
+        head0 === "g" ||
+        head0 === "genotype"
+      ) {
+        start = 1;
+      }
+      const names = [];
+      const X = [];
+      for (let r = start; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row.length) continue;
+        const first = String(row[0] ?? "").trim();
+        const numsTail = row.slice(1).map((x) => Number(String(x).trim()));
+        const allNum =
+          row.length > 1 &&
+          row.every((cell, idx) => idx === 0 || Number.isFinite(Number(String(cell).trim())));
+        const firstNum = Number(first);
+        if (first !== "" && Number.isFinite(firstNum) && allNum) {
+          names.push(`G${names.length + 1}`);
+          X.push(row.map((x) => Number(String(x).trim())));
+        } else if (first !== "" && !Number.isFinite(firstNum)) {
+          names.push(first.slice(0, 48));
+          if (numsTail.some((v) => !Number.isFinite(v))) return null;
+          X.push(numsTail);
+        } else if (first !== "" && Number.isFinite(firstNum)) {
+          names.push(`G${names.length + 1}`);
+          X.push(row.map((x) => Number(String(x).trim())));
+        } else {
+          return null;
+        }
+      }
+      if (!X.length) return null;
+      const p = Math.min(...X.map((row) => row.length));
+      const n = X.length;
+      const XX = X.map((row) => row.slice(0, p));
+      return { n, p, X: XX, names: names.slice(0, n).map((s, i) => s || `G${i + 1}`) };
     }
 
     function sqDist(a, b) {
@@ -11023,9 +12084,13 @@ G4,1.12,35.8,2.22,11.7`;
     }
 
     /** Unrooted-style Newick from UPGMA linkage (merge order = algorithm order). */
-    function linkageToNewickString(linkage, n) {
+    function linkageToNewickString(linkage, n, names) {
+      const safe = (s, i) => {
+        const t = String(s ?? "").trim() || `G${i + 1}`;
+        return t.replace(/[(),:;\s]/g, "_").slice(0, 32);
+      };
       const nodes = new Map();
-      for (let i = 0; i < n; i++) nodes.set(i, `G${i + 1}`);
+      for (let i = 0; i < n; i++) nodes.set(i, safe(names?.[i], i));
       let newId = n;
       for (const [a, b] of linkage) {
         const left = nodes.get(a);
@@ -11191,7 +12256,8 @@ G4,1.12,35.8,2.22,11.7`;
     }
 
     function drawSimpleScatterClusters(canvas, X, labels, pointSize, opts = {}) {
-      const points = X.map((r, i) => ({ x: r[0], y: r[1] ?? 0, c: labels[i], name: `G${i + 1}` }));
+      const nameList = opts.names && opts.names.length === X.length ? opts.names : X.map((_, i) => `G${i + 1}`);
+      const points = X.map((r, i) => ({ x: r[0], y: r[1] ?? 0, c: labels[i], name: nameList[i] }));
       drawScatterPlot(canvas, points, {
         title: opts.title || "Cluster scatter (Trait1 vs Trait2)",
         xLabel: opts.xLabel || "Trait1",
@@ -11209,7 +12275,8 @@ G4,1.12,35.8,2.22,11.7`;
       const rx = Math.max(1e-9, maxX - minX), ry = Math.max(1e-9, maxY - minY);
       const colors = ["#0d9488", "#d97706", "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#0891b2"];
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      for (const p of points) {
+      for (let idx = 0; idx < points.length; idx++) {
+        const p = points[idx];
         const pt = projectScatterXY(w, h, true, minX, rx, minY, ry, p.x, p.y);
         ctx.fillStyle = colors[p.c % colors.length];
         ctx.beginPath();
@@ -11218,10 +12285,17 @@ G4,1.12,35.8,2.22,11.7`;
         ctx.strokeStyle = "rgba(255,255,255,0.9)";
         ctx.lineWidth = 1;
         ctx.stroke();
+        const lab = String(p.name || `G${idx + 1}`);
+        const short = lab.length > 14 ? `${lab.slice(0, 12)}…` : lab;
+        ctx.font = "600 11px Segoe UI, system-ui, sans-serif";
+        ctx.fillStyle = "#0f172a";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(short, pt.px + Math.max(6, pointSize * 0.6), pt.py);
       }
     }
 
-    function drawDendrogram(canvas, linkage, n, lineW = 2, cutPct = 60) {
+    function drawDendrogram(canvas, linkage, n, lineW = 2, cutPct = 60, leafLabels = null) {
       const ctx = canvas.getContext("2d");
       const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
@@ -11236,7 +12310,9 @@ G4,1.12,35.8,2.22,11.7`;
 
       const xPos = {};
       const yPos = {};
-      const padL = 32, padR = 16, padT = 24, padB = 34;
+      const labels = leafLabels && leafLabels.length === n ? leafLabels : Array.from({ length: n }, (_, i) => `G${i + 1}`);
+      const maxLab = Math.max(8, ...labels.map((s) => String(s).length));
+      const padL = 36, padR = 16, padT = 26, padB = labels ? Math.min(110, 36 + Math.min(maxLab * 5, 72)) : 34;
       for (let i = 0; i < n; i++) {
         xPos[i] = padL + i * ((w - padL - padR) / Math.max(1, n - 1));
         yPos[i] = h - padB;
@@ -11289,6 +12365,152 @@ G4,1.12,35.8,2.22,11.7`;
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
       ctx.fillText(`cut ${Math.max(5, Math.min(95, cutPct)).toFixed(0)}%`, padL + 6, yCut - 4);
+
+      ctx.fillStyle = "#0f172a";
+      ctx.font = "600 10px Segoe UI, system-ui, sans-serif";
+      for (let i = 0; i < n; i++) {
+        const xi = xPos[i];
+        const text = String(labels[i]).length > 18 ? `${String(labels[i]).slice(0, 16)}…` : String(labels[i]);
+        ctx.save();
+        ctx.translate(xi, h - padB + 10);
+        ctx.rotate(-Math.PI / 4);
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, 0, 0);
+        ctx.restore();
+      }
+    }
+
+    /** Heat map of symmetric D² matrix with genotype labels. */
+    function drawD2MatrixHeatmap(canvas, D2, names) {
+      applyChartThemeFromStorage();
+      const n = D2.length;
+      if (!n) return;
+      const { ctx, w, h } = setupCanvas(canvas);
+      const padT = 40;
+      const padB = 28;
+      let maxLen = 4;
+      for (const s of names) maxLen = Math.max(maxLen, String(s).length);
+      const padL = Math.min(140, 16 + maxLen * 6);
+      const padR = 12;
+      const plotW = w - padL - padR;
+      const plotH = h - padT - padB;
+      const cell = Math.min(plotW / n, plotH / n, 48);
+      const gridW = cell * n;
+      const gridH = cell * n;
+      const ox = padL + (plotW - gridW) / 2;
+      const oy = padT + (plotH - gridH) / 2;
+      let vmax = 0;
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (i !== j) vmax = Math.max(vmax, D2[i][j]);
+      if (vmax < 1e-12) vmax = 1;
+      ctx.fillStyle = CHART.bg;
+      ctx.fillRect(0, 0, w, h);
+      fillPlotBackground(ctx, padL, padT, plotW, plotH);
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, system-ui, sans-serif";
+      ctx.textBaseline = "top";
+      ctx.fillText("Pairwise Mahalanobis D² matrix", padL, 8);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          const v = D2[i][j] / vmax;
+          const g = i === j ? 220 : 255 - Math.round(200 * Math.min(1, v));
+          const b = i === j ? 240 : 255 - Math.round(80 * Math.min(1, v));
+          ctx.fillStyle = i === j ? "rgba(15, 118, 110, 0.25)" : `rgb(255,${g},${b})`;
+          ctx.strokeStyle = "rgba(15, 23, 42, 0.12)";
+          ctx.lineWidth = 1;
+          ctx.fillRect(ox + j * cell, oy + i * cell, cell - 1, cell - 1);
+          ctx.strokeRect(ox + j * cell, oy + i * cell, cell - 1, cell - 1);
+          ctx.fillStyle = CHART.ink;
+          ctx.font = cell > 22 ? "600 10px Segoe UI, sans-serif" : "600 8px Segoe UI, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          const txt = D2[i][j] < 10 ? D2[i][j].toFixed(3) : D2[i][j].toFixed(2);
+          ctx.fillText(txt, ox + j * cell + (cell - 1) / 2, oy + i * cell + (cell - 1) / 2);
+        }
+      }
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 9px Segoe UI, sans-serif";
+      ctx.textAlign = "right";
+      for (let i = 0; i < n; i++) {
+        const lab = String(names[i]).length > 12 ? `${String(names[i]).slice(0, 10)}…` : String(names[i]);
+        ctx.fillText(lab, ox - 6, oy + i * cell + (cell - 1) / 2);
+      }
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      for (let j = 0; j < n; j++) {
+        const lab = String(names[j]).length > 12 ? `${String(names[j]).slice(0, 10)}…` : String(names[j]);
+        ctx.save();
+        ctx.translate(ox + j * cell + (cell - 1) / 2, oy - 4);
+        ctx.rotate(-Math.PI / 6);
+        ctx.fillText(lab, 0, 0);
+        ctx.restore();
+      }
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 10px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(`max off-diagonal D² = ${vmax.toFixed(4)}`, padL, h - 8);
+    }
+
+    /** Bar chart: intra-cluster mean D² vs mean inter-cluster D² for each consensus cluster. */
+    function drawIntraInterClusterBars(canvas, intraInterMat, cKeys) {
+      applyChartThemeFromStorage();
+      const k = cKeys.length;
+      if (!k) return;
+      const intra = intraInterMat.map((row, i) => row[i]);
+      const meanInter = intraInterMat.map((row, i) => {
+        let s = 0;
+        let c = 0;
+        for (let j = 0; j < k; j++) {
+          if (j === i) continue;
+          s += row[j];
+          c++;
+        }
+        return c ? s / c : 0;
+      });
+      const { ctx, w, h } = setupCanvas(canvas);
+      const padL = 56;
+      const padR = 18;
+      const padT = 44;
+      const padB = 56;
+      const plotW = w - padL - padR;
+      const plotH = h - padT - padB;
+      const maxV = Math.max(1e-9, ...intra, ...meanInter, ...intraInterMat.flat());
+      ctx.fillStyle = CHART.bg;
+      ctx.fillRect(0, 0, w, h);
+      fillPlotBackground(ctx, padL, padT, plotW, plotH);
+      ctx.fillStyle = CHART.ink;
+      ctx.font = "700 15px Segoe UI, sans-serif";
+      ctx.fillText("Intra- vs mean inter-cluster D² (consensus)", padL, 8);
+      const bw = plotW / Math.max(1, k * 2.5);
+      const gap = bw * 0.35;
+      const cols = ["#0d9488", "#ea580c"];
+      for (let i = 0; i < k; i++) {
+        const cx = padL + (i + 0.5) * (plotW / k) - bw - gap / 2;
+        const h1 = (intra[i] / maxV) * plotH;
+        const h2 = (meanInter[i] / maxV) * plotH;
+        ctx.fillStyle = cols[0];
+        roundRect(ctx, cx, padT + plotH - h1, bw, h1, 4);
+        ctx.fill();
+        ctx.fillStyle = cols[1];
+        roundRect(ctx, cx + bw + gap, padT + plotH - h2, bw, h2, 4);
+        ctx.fill();
+        ctx.fillStyle = CHART.inkMuted;
+        ctx.font = "600 10px Segoe UI, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(`C${i + 1}`, cx + bw + gap / 2, padT + plotH + 6);
+      }
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.font = "600 11px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("Intra", padL, padT + plotH + 22);
+      ctx.fillStyle = cols[0];
+      ctx.fillRect(padL + 36, padT + plotH + 24, 12, 8);
+      ctx.fillStyle = CHART.inkMuted;
+      ctx.fillText("Mean inter", padL + 56, padT + plotH + 22);
+      ctx.fillStyle = cols[1];
+      ctx.fillRect(padL + 130, padT + plotH + 24, 12, 8);
     }
 
     function heterosisRows() {
@@ -11310,6 +12532,16 @@ G4,1.12,35.8,2.22,11.7`;
     }
 
     build(defaultN, defaultT);
+
+    const d2PlotlyThemeSel = document.getElementById("d2PlotlyTheme");
+    if (d2PlotlyThemeSel) {
+      d2PlotlyThemeSel.value = localStorage.getItem("bkq_plotly_theme") === "dark" ? "dark" : "light";
+      d2PlotlyThemeSel.addEventListener("change", () => {
+        localStorage.setItem("bkq_plotly_theme", d2PlotlyThemeSel.value === "dark" ? "dark" : "light");
+        $("#d2Compute").click();
+      });
+    }
+
     $("#d2Build").addEventListener("click", () => {
       const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
       const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
@@ -11319,8 +12551,10 @@ G4,1.12,35.8,2.22,11.7`;
     $("#d2TemplateCsv").addEventListener("click", () => {
       const n = Math.max(5, Math.min(40, Number($("#d2N").value || defaultN)));
       const p = Math.max(2, Math.min(10, Number($("#d2T").value || defaultT)));
-      const rows = [Array.from({ length: p }, (_, j) => `Trait${j + 1}`)];
-      for (let i = 0; i < n; i++) rows.push(Array.from({ length: p }, (_, j) => (10 + i * 0.8 + j * 1.1).toFixed(2)));
+      const rows = [["Genotype", ...Array.from({ length: p }, (_, j) => `Trait${j + 1}`)]];
+      for (let i = 0; i < n; i++) {
+        rows.push([`G${i + 1}`, ...Array.from({ length: p }, (_, j) => (10 + i * 0.8 + j * 1.1).toFixed(2))]);
+      }
       triggerCsvDownload("d2_trait_matrix_template.csv", rows);
     });
     $("#d2ImportCsv").addEventListener("click", () => $("#d2CsvFile").click());
@@ -11334,10 +12568,23 @@ G4,1.12,35.8,2.22,11.7`;
         alert(err?.message || String(err));
         return;
       }
-      const mat = parseNumericCsvMatrix(txt);
-      if (!mat.length) return;
-      const n = Math.max(5, Math.min(40, mat.length));
-      const p = Math.max(2, Math.min(10, Math.min(...mat.map((r) => r.length))));
+      const parsed = parseD2TraitImport(txt);
+      let n;
+      let p;
+      let mat;
+      let nameRow = null;
+      if (parsed && parsed.X?.length) {
+        n = Math.max(5, Math.min(40, parsed.n));
+        p = Math.max(2, Math.min(10, parsed.p));
+        mat = parsed.X.map((row) => row.slice(0, p));
+        nameRow = parsed.names;
+      } else {
+        mat = parseNumericCsvMatrix(txt);
+        if (!mat.length) return;
+        n = Math.max(5, Math.min(40, mat.length));
+        p = Math.max(2, Math.min(10, Math.min(...mat.map((r) => r.length))));
+        nameRow = null;
+      }
       $("#d2N").value = String(n);
       $("#d2T").value = String(p);
       build(n, p);
@@ -11347,12 +12594,18 @@ G4,1.12,35.8,2.22,11.7`;
         const input = document.querySelector(`#d2Wrap input[data-d2="g${i}t${j}"]`);
         if (input) input.value = String(v);
       }
+      if (nameRow && nameRow.length === n) {
+        for (let i = 0; i < n; i++) {
+          const inp = document.querySelector(`#d2Wrap input[data-d2-name="${i}"]`);
+          if (inp) inp.value = String(nameRow[i] || `G${i + 1}`).slice(0, 48);
+        }
+      }
       $("#d2Compute").click();
       e.target.value = "";
     });
 
     $("#d2Compute").addEventListener("click", () => {
-      const { n, X } = readData();
+      const { n, X, names } = readData();
       clearValidation("#d2Wrap");
       const errors = [];
       for (let i = 0; i < n; i++) {
@@ -11366,6 +12619,7 @@ G4,1.12,35.8,2.22,11.7`;
         }
       }
       if (shouldBlockForValidation("d2", errors, "#d2Kpis")) return;
+      purgeD2PlotlyFigures();
       const std = !!$("#d2Standardize")?.checked;
       const Xuse = std ? zScoreColumns(X).Z : X;
       const k = Math.max(2, Math.min(12, Number($("#d2K").value || 3)));
@@ -11411,17 +12665,18 @@ G4,1.12,35.8,2.22,11.7`;
       const lineW = Math.max(1, Math.min(5, Number($("#d2LineW").value || 2)));
       const cut = Math.max(5, Math.min(95, Number($("#d2Cut").value || 60)));
 
-      const newickStr = linkageToNewickString(linkUpgmaD, n);
+      const newickStr = linkageToNewickString(linkUpgmaD, n, names);
 
       drawSimpleScatterClusters($("#d2ClusterChart"), Z, consLab, pointSize, {
+        names,
         title: mahalFallback
           ? "Cluster scatter (Trait1 vs Trait2)"
           : "Cluster scatter (Mahalanobis-whitened axes 1 vs 2)",
         xLabel: mahalFallback ? "Trait1" : "Axis 1",
         yLabel: mahalFallback ? "Trait2" : "Axis 2",
       });
-      drawDendrogram($("#d2DendroChart"), linkUpgmaD, n, lineW, cut);
-      drawDendrogram($("#d2DendroConsensusChart"), cons.link, n, lineW, cut);
+      drawDendrogram($("#d2DendroChart"), linkUpgmaD, n, lineW, cut, names);
+      drawDendrogram($("#d2DendroConsensusChart"), cons.link, n, lineW, cut, names);
 
       // cluster metrics from consensus labels (D² = Mahalanobis squared distance)
       const clusters = {};
@@ -11460,9 +12715,12 @@ G4,1.12,35.8,2.22,11.7`;
       for (const ck of cKeys) maxIntra = Math.max(maxIntra, avgIntraD2(clusters[ck]));
 
       const intraInterMat = clusterIntraInterD2MeanMatrix(D2, clusters, cKeys);
+      drawD2MatrixHeatmap($("#d2D2HeatmapChart"), D2, names);
+      drawIntraInterClusterBars($("#d2IntraInterBarChart"), intraInterMat, cKeys);
+      renderD2PlotlyHeatmapAndPca3d(D2, names, Xuse);
       const intraRows = cKeys.map((c) => [
         `Cluster ${c + 1}`,
-        clusters[c].map((i) => `G${i + 1}`).join(", "),
+        clusters[c].map((i) => names[i] || `G${i + 1}`).join(", "),
         avgIntraD2(clusters[c]),
         clusters[c].length,
       ]);
@@ -11484,6 +12742,11 @@ G4,1.12,35.8,2.22,11.7`;
           <div class="kpi"><div class="label">Mean BP heterosis</div><div class="value">${bphMean.toFixed(2)}%</div></div>
         </div>
       `;
+
+      const tD2matrix = buildTable(
+        ["Genotype", ...names],
+        names.map((ni, i) => [ni, ...D2[i].map((v) => v.toFixed(4))])
+      );
 
       const tMethod = buildTable(
         ["Method", "Clusters formed"],
@@ -11567,16 +12830,18 @@ G4,1.12,35.8,2.22,11.7`;
       `;
 
       $("#d2Tables").innerHTML =
-        `${qualityScoreHtml(qItemsD2)}<div style="height:10px"></div><h4>Table 1. Method-wise cluster counts</h4>${tMethod}` +
-        `<div style="height:10px"></div><h4>Table 2. Consensus clustering summary (Mahalanobis D²)</h4>${tCons}` +
-        `<div style="height:10px"></div><h4>Table 3. Intra- and inter-cluster mean pairwise D²</h4>` +
+        `${qualityScoreHtml(qItemsD2)}<div style="height:10px"></div><h4>Table 1. Pairwise Mahalanobis D² matrix (full)</h4>` +
+        `<p class="muted small">Diagonal is zero; off-diagonals are generalized squared distances using pooled (ridge) covariance.</p>${tD2matrix}` +
+        `<div style="height:10px"></div><h4>Table 2. Method-wise cluster counts</h4>${tMethod}` +
+        `<div style="height:10px"></div><h4>Table 3. Consensus clustering summary (Mahalanobis D²)</h4>${tCons}` +
+        `<div style="height:10px"></div><h4>Table 4. Intra- and inter-cluster mean pairwise D²</h4>` +
         `<p class="muted small">Diagonal: mean D² within cluster; off-diagonal: mean D² between clusters (symmetric).</p>${tIntraInter}` +
         `<div style="height:10px"></div>${dendroNote}` +
-        `<div style="height:10px"></div><h4>Table 4. UPGMA merge order (D²-based distance)</h4>${tMerge}` +
-        `<div style="height:10px"></div><h4>Table 5. Cluster means by traits</h4>${tClusterMeans}` +
-        `<div style="height:10px"></div><h4>Table 6. Trait-wise contribution of raw squared differences</h4>${tContrib}` +
-        `<div style="height:10px"></div><h4>Table 7. Heterosis values</h4>${tHet}` +
-        `<div style="height:10px"></div>${assumptionsChecklistHtml("Table 8. Assumption checklist", [
+        `<div style="height:10px"></div><h4>Table 5. UPGMA merge order (D²-based distance)</h4>${tMerge}` +
+        `<div style="height:10px"></div><h4>Table 6. Cluster means by traits</h4>${tClusterMeans}` +
+        `<div style="height:10px"></div><h4>Table 7. Trait-wise contribution of raw squared differences</h4>${tContrib}` +
+        `<div style="height:10px"></div><h4>Table 8. Heterosis values</h4>${tHet}` +
+        `<div style="height:10px"></div>${assumptionsChecklistHtml("Table 9. Assumption checklist", [
           { assumption: "Trait scaling compatibility", status: "Recommended", note: "Standardize traits when units differ strongly." },
           { assumption: "Mahalanobis D²", status: "Assumed", note: "Pooled covariance S with ridge; linkage uses D = √(D²). Fallback uses Euclidean if S is not PD." },
           { assumption: "Method agreement", status: "Recommended", note: "Consensus clustering improves robustness over single-method solutions." },
@@ -11634,6 +12899,11 @@ G4,1.12,35.8,2.22,11.7`;
                 </select>
               </label>
               <button class="action-btn primary2" type="button" id="mgBuild">Build metroglyph table</button>
+              <div class="muted small" style="margin-top:8px">
+                <strong>Import CSV / Excel:</strong> columns = Genotype, Cluster, Trait1, Trait2, … (numeric traits). Rows match current n×p after resize or use Import to set dimensions from file.
+              </div>
+              <button class="action-btn" type="button" id="mgImportCsv" style="margin-top:6px">Import CSV / Excel</button>
+              <input type="file" id="mgCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
             </div>
             <div id="mgWrap" class="matrix" style="margin-top:12px"></div>
             <div class="actions" style="margin-top:12px">
@@ -11773,6 +13043,30 @@ G4,1.12,35.8,2.22,11.7`;
       build(n, p);
     });
 
+    bindCsvExcelFileImport("mgImportCsv", "mgCsvFile", (txt) => {
+      const rows = parseCsv(txt).filter((r) => r.some((c) => String(c).trim() !== ""));
+      if (rows.length < 7) {
+        alert("Need a header row and at least 6 data rows (genotypes).");
+        return;
+      }
+      const first = rows[1];
+      const p = Math.max(2, Math.min(8, first.length - 2));
+      const n = Math.min(40, Math.max(6, rows.length - 1));
+      $("#mgN").value = String(n);
+      $("#mgT").value = String(p);
+      build(n, p);
+      for (let i = 0; i < n; i++) {
+        const row = rows[1 + i] || [];
+        const cl = Math.max(1, Math.min(8, Math.round(Number(row[1]) || 1)));
+        const sel = document.querySelector(`#mgWrap select[data-mg="g${i}c"]`);
+        if (sel) sel.value = String(cl);
+        for (let j = 0; j < p; j++) {
+          const inp = document.querySelector(`#mgWrap input[data-mg="g${i}t${j}"]`);
+          if (inp) inp.value = String(Number(row[j + 2]) || 0);
+        }
+      }
+    });
+
     $("#mgCompute").addEventListener("click", () => {
       const { n, p, X, C } = read();
       const mode = String($("#mgScale").value || "per-trait");
@@ -11846,7 +13140,7 @@ G4,1.12,35.8,2.22,11.7`;
         <div class="kpi-row">
           <div class="kpi"><div class="label">Module</div><div class="value">${qs(title)}</div></div>
           <div class="kpi"><div class="label">Data mode</div><div class="value">Example results</div></div>
-          <div class="kpi"><div class="label">Export</div><div class="value">DOC + XLS</div></div>
+          <div class="kpi"><div class="label">Export</div><div class="value">Word (.mht) + XLS</div></div>
         </div>
         ${chartHtml}
         ${tableHtml}
@@ -11882,6 +13176,70 @@ G4,1.12,35.8,2.22,11.7`;
   }
 
   // --- Biometric Report (summary, correlation heatmap, Plotly charts, ANOVA) ---
+  /** Browser Plotly.js (not Python plotly.express): shared publication-style layout + export-friendly fonts. */
+  const BKQ_PLOTLY_COLORWAY = ["#0f766e", "#0369a1", "#7c3aed", "#c2410c", "#be123c", "#0d9488", "#4f46e5", "#db2777"];
+
+  function bkqPlotlyThemeIsDark() {
+    return localStorage.getItem("bkq_plotly_theme") === "dark";
+  }
+
+  function bkqPlotlyLayout(titleText, overrides = {}) {
+    const dark = bkqPlotlyThemeIsDark();
+    return {
+      template: dark ? "plotly_dark" : "plotly_white",
+      title: {
+        text: titleText,
+        font: {
+          size: 17,
+          family: "Inter, ui-sans-serif, system-ui, 'Segoe UI', sans-serif",
+          color: dark ? "#f8fafc" : "#0f172a",
+        },
+        x: 0.02,
+        xanchor: "left",
+        pad: { t: 10, b: 6 },
+      },
+      font: {
+        family: "Inter, ui-sans-serif, system-ui, 'Segoe UI', sans-serif",
+        size: 14,
+        color: dark ? "#cbd5e1" : "#334155",
+      },
+      paper_bgcolor: dark ? "#0f172a" : "#ffffff",
+      plot_bgcolor: dark ? "#1e293b" : "#f1f5f9",
+      colorway: BKQ_PLOTLY_COLORWAY,
+      margin: { l: 76, r: 36, t: 92, b: 88 },
+      hoverlabel: {
+        font: { family: "Inter, ui-sans-serif, system-ui, sans-serif", size: 13 },
+        bgcolor: dark ? "#334155" : "#0f172a",
+        bordercolor: dark ? "#94a3b8" : "#0f172a",
+      },
+      ...overrides,
+    };
+  }
+
+  function bkqPlotlyConfig() {
+    return {
+      responsive: true,
+      displayModeBar: true,
+      displaylogo: false,
+      modeBarButtonsToRemove: ["lasso2d", "select2d"],
+      toImageButtonOptions: {
+        format: "png",
+        filename: "bkquant_plot",
+        width: 1400,
+        height: 820,
+        scale: 2,
+      },
+    };
+  }
+
+  function bkqPlotlyGridColors() {
+    const dark = bkqPlotlyThemeIsDark();
+    return {
+      grid: dark ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.38)",
+      zero: dark ? "#64748b" : "#94a3b8",
+    };
+  }
+
   function studentTInvTwoTail(df, alphaTwoTail) {
     const p = 1 - alphaTwoTail / 2;
     if (typeof jStat !== "undefined" && jStat.studentt && typeof jStat.studentt.inv === "function") {
@@ -12028,12 +13386,20 @@ G4,32.8,33.2,32.9`;
               Data
               <textarea id="bioMulti" rows="10">${defaultMulti}</textarea>
             </label>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="bioImportMulti">Import genotype × trait (CSV / Excel)</button>
+              <input type="file" id="bioMultiFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <h4 style="margin-top:14px">2. Optional — CRD replicates (one response)</h4>
             <p class="muted small">Rows = treatments; columns = replicates (equal r). First column may be labels. Used for one-way ANOVA on the <b>first trait</b> column above (matched by row order) — or leave default as separate yield trial.</p>
             <label>
               Treatment × replicate (optional)
               <textarea id="bioCrd" rows="6">${defaultCrd}</textarea>
             </label>
+            <div class="actions" style="margin-top:8px">
+              <button class="action-btn" type="button" id="bioImportCrd">Import CRD matrix (CSV / Excel)</button>
+              <input type="file" id="bioCrdFile" accept="${BKQ_DATA_FILE_ACCEPT}" style="display:none" />
+            </div>
             <div class="actions" style="margin-top:12px">
               <button class="action-btn primary2" type="button" id="bioCompute">Run biometric analysis</button>
             </div>
@@ -12042,6 +13408,16 @@ G4,32.8,33.2,32.9`;
         <div>
           <div class="section" style="margin:0">
             <h4>Outputs</h4>
+            <div class="actions" style="margin:0 0 12px;flex-wrap:wrap;align-items:center;gap:10px">
+              <label class="muted small" style="display:flex;align-items:center;gap:8px;margin:0;font-weight:650">
+                Plotly theme
+                <select id="bioPlotlyTheme" aria-label="Plotly figure theme" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);font-size:13px;background:var(--surface);color:var(--text)">
+                  <option value="light">Light (print)</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <span class="muted small" style="line-height:1.4">Charts use large type and crisp grids; exports use high-resolution PNGs.</span>
+            </div>
             <div id="bioOutSummary"></div>
             <div id="bioOutCorr"></div>
             <div id="bioPlotBar" class="plotly-chart" style="margin-top:12px"></div>
@@ -12066,6 +13442,18 @@ G4,32.8,33.2,32.9`;
       ["bioPlotBar", "bioPlotBox", "bioPlotScatter"].forEach((id) => {
         const el = document.getElementById(id);
         if (el && typeof Plotly !== "undefined" && Plotly.purge) Plotly.purge(el);
+      });
+    }
+
+    bindCsvExcelToTextarea("bioImportMulti", "bioMultiFile", "bioMulti");
+    bindCsvExcelToTextarea("bioImportCrd", "bioCrdFile", "bioCrd");
+
+    const bioThemeSel = document.getElementById("bioPlotlyTheme");
+    if (bioThemeSel) {
+      bioThemeSel.value = localStorage.getItem("bkq_plotly_theme") === "dark" ? "dark" : "light";
+      bioThemeSel.addEventListener("change", () => {
+        localStorage.setItem("bkq_plotly_theme", bioThemeSel.value === "dark" ? "dark" : "light");
+        $("#bioCompute").click();
       });
     }
 
@@ -12105,6 +13493,8 @@ G4,32.8,33.2,32.9`;
       const err = Array(n).fill(summaryRows[traitIdxBar] ? summaryRows[traitIdxBar][2] : 0);
 
       if (typeof Plotly !== "undefined") {
+        const g = bkqPlotlyGridColors();
+        const errColor = bkqPlotlyThemeIsDark() ? "#94a3b8" : "#64748b";
         Plotly.newPlot(
           "bioPlotBar",
           [
@@ -12112,58 +13502,78 @@ G4,32.8,33.2,32.9`;
               type: "bar",
               x: rowNames,
               y: ys,
-              error_y: { type: "data", array: err, visible: true, color: "#64748b", thickness: 1.2 },
-              marker: { color: "rgba(6, 78, 59, 0.82)" },
+              error_y: { type: "data", array: err, visible: true, color: errColor, thickness: 1.5, width: 5 },
+              marker: {
+                color: BKQ_PLOTLY_COLORWAY[0],
+                line: { color: "rgba(15, 23, 42, 0.2)", width: 0 },
+              },
               name: colNames[traitIdxBar],
             },
           ],
-          {
-            title: `Mean comparison — ${colNames[traitIdxBar]} (± SE across entries)`,
-            paper_bgcolor: "#ffffff",
-            plot_bgcolor: "#f8fafc",
-            font: { color: "#1e293b", family: "Segoe UI, system-ui, sans-serif" },
-            margin: { t: 48, b: 56 },
-            yaxis: {
-              title: colNames[traitIdxBar],
-              zeroline: true,
-              gridcolor: "rgba(148, 163, 184, 0.5)",
-              showgrid: true,
+          bkqPlotlyLayout(`Mean comparison — ${colNames[traitIdxBar]} (± SE across entries)`, {
+            showlegend: false,
+            xaxis: {
+              title: { text: "Entry" },
+              tickangle: -28,
+              showgrid: false,
+              automargin: true,
             },
-            xaxis: { title: "Entry", tickangle: -25, showgrid: false },
-          },
-          { responsive: true, displayModeBar: false }
+            yaxis: {
+              title: { text: colNames[traitIdxBar] },
+              zeroline: true,
+              zerolinecolor: g.zero,
+              gridcolor: g.grid,
+              showgrid: true,
+              automargin: true,
+            },
+          }),
+          bkqPlotlyConfig()
         );
 
-        const boxTraces = colNames.map((name, j) => ({
-          type: "box",
-          y: data.map((row) => row[j]),
-          name,
-          marker: { color: `hsl(${160 + j * 18}, 45%, 42%)` },
-          boxmean: "sd",
-        }));
+        const boxTraces = colNames.map((name, j) => {
+          const c = BKQ_PLOTLY_COLORWAY[j % BKQ_PLOTLY_COLORWAY.length];
+          return {
+            type: "box",
+            y: data.map((row) => row[j]),
+            name,
+            marker: { color: c, outliercolor: c },
+            line: { color: bkqPlotlyThemeIsDark() ? "#e2e8f0" : "#334155", width: 1.2 },
+            fillcolor: c,
+            opacity: 0.9,
+            boxmean: "sd",
+          };
+        });
         Plotly.newPlot(
           "bioPlotBox",
           boxTraces,
-          {
-            title: "Trait distributions across entries (box: quartiles + whiskers)",
-            paper_bgcolor: "#ffffff",
-            plot_bgcolor: "#f8fafc",
-            font: { color: "#1e293b", size: 12 },
-            yaxis: { title: "Value", gridcolor: "rgba(148, 163, 184, 0.45)", showgrid: true },
-            xaxis: { title: "Trait", showgrid: false },
+          bkqPlotlyLayout("Trait distributions across entries (quartiles, whiskers, mean ± SD)", {
             showlegend: false,
-            margin: { t: 48, b: 48 },
-          },
-          { responsive: true, displayModeBar: false }
+            xaxis: {
+              title: { text: "Trait" },
+              showgrid: false,
+              automargin: true,
+            },
+            yaxis: {
+              title: { text: "Value" },
+              zeroline: true,
+              zerolinecolor: g.zero,
+              gridcolor: g.grid,
+              showgrid: true,
+              automargin: true,
+            },
+          }),
+          bkqPlotlyConfig()
         );
 
         const xCol = data.map((row) => row[0]);
         const yCol = data.map((row) => row[1]);
-        const { slope, intercept, r, r2 } = simpleLinearRegression(xCol, yCol);
+        const { slope, intercept, r2 } = simpleLinearRegression(xCol, yCol);
         const minX = Math.min(...xCol);
         const maxX = Math.max(...xCol);
         const lineX = [minX, maxX];
         const lineY = [intercept + slope * minX, intercept + slope * maxX];
+        const annBg = bkqPlotlyThemeIsDark() ? "rgba(30,41,59,0.9)" : "rgba(255,255,255,0.94)";
+        const annBr = bkqPlotlyThemeIsDark() ? "#475569" : "#cbd5e1";
         Plotly.newPlot(
           "bioPlotScatter",
           [
@@ -12173,26 +13583,42 @@ G4,32.8,33.2,32.9`;
               x: xCol,
               y: yCol,
               text: rowNames,
-              marker: { size: 10, color: "rgba(6, 78, 59, 0.85)" },
-              name: "Obs",
+              hovertemplate: "%{text}<br>" + colNames[0] + ": %{x:.4f}<br>" + colNames[1] + ": %{y:.4f}<extra></extra>",
+              marker: {
+                size: 12,
+                color: BKQ_PLOTLY_COLORWAY[0],
+                line: { color: "#ffffff", width: 1 },
+              },
+              name: "Observations",
             },
             {
               type: "scatter",
               mode: "lines",
               x: lineX,
               y: lineY,
-              line: { color: "#e11d48", width: 2 },
+              line: { color: BKQ_PLOTLY_COLORWAY[4], width: 2.5 },
               name: "OLS fit",
             },
           ],
-          {
-            title: `Regression / path-style trend: ${colNames[1]} vs ${colNames[0]} (R² = ${r2.toFixed(4)})`,
-            paper_bgcolor: "#ffffff",
-            plot_bgcolor: "#f8fafc",
-            font: { color: "#1e293b", size: 12 },
-            xaxis: { title: colNames[0], gridcolor: "rgba(148, 163, 184, 0.4)", showgrid: true },
-            yaxis: { title: colNames[1], gridcolor: "rgba(148, 163, 184, 0.4)", showgrid: true },
-            margin: { t: 48 },
+          bkqPlotlyLayout(`Regression — ${colNames[1]} vs ${colNames[0]} (R² = ${r2.toFixed(4)})`, {
+            showlegend: true,
+            legend: { orientation: "h", yanchor: "bottom", y: 1.03, xanchor: "right", x: 1, font: { size: 13 } },
+            xaxis: {
+              title: { text: colNames[0] },
+              showgrid: true,
+              gridcolor: g.grid,
+              zeroline: true,
+              zerolinecolor: g.zero,
+              automargin: true,
+            },
+            yaxis: {
+              title: { text: colNames[1] },
+              showgrid: true,
+              gridcolor: g.grid,
+              zeroline: true,
+              zerolinecolor: g.zero,
+              automargin: true,
+            },
             annotations: [
               {
                 x: maxX,
@@ -12200,11 +13626,15 @@ G4,32.8,33.2,32.9`;
                 text: `y = ${intercept.toFixed(3)} + ${slope.toFixed(3)}x`,
                 showarrow: false,
                 xanchor: "right",
-                font: { size: 11 },
+                font: { size: 13, family: "Inter, ui-sans-serif, system-ui, sans-serif", color: bkqPlotlyThemeIsDark() ? "#f1f5f9" : "#0f172a" },
+                bgcolor: annBg,
+                bordercolor: annBr,
+                borderwidth: 1,
+                borderpad: 5,
               },
             ],
-          },
-          { responsive: true, displayModeBar: false }
+          }),
+          bkqPlotlyConfig()
         );
       } else {
         $("#bioPlotBar").innerHTML = `<p class="muted small">Plotly failed to load — check network for CDN.</p>`;
@@ -12392,6 +13822,11 @@ G5,30.8,11.9,40.1`;
 
         <label class="mb-2 block text-sm font-medium text-slate-300">Data (CSV: header row, first column = genotype/sample)</label>
         <textarea id="diCsv" class="mb-3 w-full rounded-lg border border-slate-600 bg-slate-950/80 p-3 font-mono text-sm text-slate-100" rows="8">${qs(defaultCsv)}</textarea>
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <button type="button" id="diImportCsv" class="rounded-lg border border-slate-500 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-slate-700">Import CSV / Excel</button>
+          <button type="button" id="diTemplateCsv" class="rounded-lg border border-slate-500 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-slate-700">Download example CSV</button>
+          <input type="file" id="diCsvFile" accept="${BKQ_DATA_FILE_ACCEPT}" class="hidden" />
+        </div>
         <div class="mb-4 flex flex-wrap gap-2">
           <button type="button" id="diCompute" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-indigo-500">Update insights</button>
           <input id="diSearch" type="search" placeholder="Search genotype…" class="min-w-[200px] flex-1 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500" />
@@ -12420,7 +13855,7 @@ G5,30.8,11.9,40.1`;
             <div>
               <h4 class="mb-2 text-sm font-semibold text-indigo-200">Grouped bar — traits by genotype (± SE)</h4>
               <p class="mb-1 text-xs text-slate-500">SE per bar = SD of that trait across genotypes / √n (screening SE).</p>
-              <div class="relative h-72 w-full rounded-lg border border-slate-700 bg-slate-900/50 p-2">
+              <div class="chart chart--dark relative h-72 w-full min-h-[288px] rounded-lg border border-slate-700 bg-slate-900/50 p-0">
                 <canvas id="diChartBar"></canvas>
               </div>
             </div>
@@ -12614,6 +14049,11 @@ G5,30.8,11.9,40.1`;
       });
     }
 
+    bindCsvExcelToTextarea("diImportCsv", "diCsvFile", "diCsv");
+    $("#diTemplateCsv").addEventListener("click", () => {
+      triggerCsvDownload("data_insights_example.csv", parseCsv(defaultCsv));
+    });
+
     $("#diCompute").addEventListener("click", computeAndRender);
     $("#diSearch").addEventListener("input", () => renderTableBody());
     computeAndRender();
@@ -12674,12 +14114,12 @@ G5,30.8,11.9,40.1`;
       discriminant: "dfaCompute",
       factoranalysis: "faCompute",
       d2: "d2Compute",
-      metroglyph: "metgCompute",
+      metroglyph: "mgCompute",
       linetester: "ltCompute",
       diallel: "diallelCompute",
       nc: "ncCompute",
       triple: "ttcCompute",
-      genmean: "gmCompute",
+      genmean: "gmaCompute",
       met: "metCompute",
       ammi: "ammiCompute",
       biometric: "bioCompute",
@@ -12689,24 +14129,106 @@ G5,30.8,11.9,40.1`;
 
   async function runSelectedAnalysesReport(ids) {
     if (!ids || !ids.length) return;
+    const allMods = Object.values(GROUPS).flat();
+    const titleById = new Map(allMods.map((m) => [m.id, m.title]));
+    const meta = loadReportMeta() || {};
     const sections = [];
-    for (const id of ids) {
+
+    const quotation = `
+      <div style="margin-top:14px;border-top:1px solid #ccc;padding-top:10px">
+        <div style="font-weight:700">BKQuant quotation (for researchers)</div>
+        <div style="margin-top:6px">“An equation for me has no meaning unless it expresses a thought of God.” — Srinivasa Ramanujan</div>
+        <div style="margin-top:6px">“Science and everyday life cannot and should not be separated.” — Rosalind Franklin</div>
+      </div>
+    `;
+
+    for (let si = 0; si < ids.length; si++) {
+      const id = ids[si];
       openModule(id);
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 30));
       const computeId = computeButtonForModule(id);
       if (computeId) document.getElementById(computeId)?.click();
       if (CURRENT_BATCH_PRESET) {
         const prev = LAST_RUN_META[id] || {};
         setRunMeta(id, { ...prev, batchPreset: CURRENT_BATCH_PRESET });
       }
-      await new Promise((r) => setTimeout(r, 0));
-      const html = document.querySelector("#contentBody .section")?.innerHTML || "";
-      sections.push(`<h2>${qs(id.toUpperCase())}</h2>${html}`);
+      await new Promise((r) => setTimeout(r, 80));
+      applyStandardTableCaptions("#contentBody");
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise((r) => setTimeout(r, 50));
+
+      const modTitle = titleById.get(id) || id;
+      const inputFmtBatch = MODULE_EXPORT_INPUT_FORMAT[id] || "";
+      const inputFmtHtml = inputFmtBatch
+        ? `<h3 style="font-size:15px;margin:12px 0 8px;color:#0f172a">Data import format</h3><p style="white-space:pre-wrap;line-height:1.5;color:#334155;font-size:12px">${qs(inputFmtBatch)}</p>`
+        : "";
+      const figureBlocks = await collectExportFigureBlocks();
+      const tables = getExportTablesFromContentBody();
+      const tableHtml = buildExportTableSectionsHtml(tables, false);
+      const interpretation = document.querySelector(".export-interpretation")?.innerText || "";
+      const runMeta = LAST_RUN_META[id] || {};
+      const breakBefore = si > 0 ? "page-break-before:always;" : "";
+
+      sections.push(`<div style="margin-top:24px;${breakBefore}">
+        <h2 style="font-size:19px;color:#0f172a;margin:0 0 6px">${qs(modTitle)}</h2>
+        <p style="color:#64748b;font-size:11px;margin:0 0 12px">Module ID: ${qs(id)} · Run: ${qs(runMeta.timestamp || new Date().toISOString())}</p>
+        ${inputFmtHtml}
+        ${figureBlocks}
+        <h3 style="font-size:16px;margin:18px 0 10px;color:#0f172a">Tables</h3>
+        ${tableHtml || '<p style="color:#64748b">No tables in this view.</p>'}
+        <h3 style="font-size:16px;margin:18px 0 10px;color:#0f172a">Interpretation</h3>
+        <p style="white-space:pre-wrap">${qs(interpretation)}</p>
+      </div>`);
     }
-    const title = "BKQuant_Batch_Report";
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${title}</title></head><body>${sections.join("<hr/>")}</body></html>`;
-    downloadBlob(`${title}.doc`, html, "application/msword");
-    downloadBlob(`${title}.xls`, html, "application/vnd.ms-excel");
+
+    const reportTitle = "BKQuant_Batch_Report";
+    const metaRows = [
+      ["Website", "BKQuant"],
+      ["Version", `BKQuant v${BKQUANT_VERSION}`],
+      ["Report type", "Batch package"],
+      ["Modules included", ids.join(", ")],
+      ["Researcher", meta.researcher || ""],
+      ["Institution", meta.institution || ""],
+      ["Date", meta.date || new Date().toISOString().slice(0, 10)],
+    ].filter((r) => String(r[1] || "").trim().length > 0);
+
+    const metaTable =
+      metaRows.length
+        ? `<table style="width:100%;border-collapse:collapse;margin:10px 0 14px">
+            <tbody>
+              ${metaRows
+                .map(
+                  ([k, v]) =>
+                    `<tr>
+                      <td style="border:1px solid #aaa;padding:6px;text-align:left;font-weight:700;background:#f7f7f7">${qs(k)}</td>
+                      <td style="border:1px solid #aaa;padding:6px;text-align:left">${qs(String(v))}</td>
+                    </tr>`
+                )
+                .join("")}
+            </tbody>
+          </table>`
+        : "";
+
+    const styles = `body{font-family:Calibri,Arial,sans-serif;font-size:12px;line-height:1.45}table{border-collapse:collapse;width:100%}th,td{border:1px solid #aaa;padding:6px}h1{font-size:20px;margin-bottom:8px}h2{font-size:16px;margin:20px 0 10px;color:#0f172a}h3{font-size:14px}img{max-width:100%;height:auto}`;
+
+    const doc = `<!doctype html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="ProgId" content="Word.Document"/>
+  <title>${qs(reportTitle)}</title>
+  <style>${styles}</style>
+</head>
+<body>
+  <h1>${qs(reportTitle)}</h1>
+  ${metaTable}
+  ${sections.join("\n")}
+  ${quotation}
+</body>
+</html>`;
+
+    downloadBlob(`${reportTitle}.mht`, "multipart/related", wrapHtmlAsMhtml(doc));
+    downloadBlob(`${reportTitle}.xls`, "application/vnd.ms-excel", doc);
   }
 
   function showRunSelectorPanel() {
@@ -12720,7 +14242,7 @@ G5,30.8,11.9,40.1`;
           <h4 style="margin:0">Run selected analyses</h4>
           <button class="action-btn" type="button" data-utility="close">Close</button>
         </div>
-        <div class="muted small" style="margin-top:6px">Select modules to auto-run and combine in one DOC/XLS package.</div>
+        <div class="muted small" style="margin-top:6px">Select modules to auto-run and combine in one Word (.mht) + XLS package (figures embedded in .mht).</div>
         <div class="actions" style="margin-top:10px">
           <button class="action-btn" type="button" data-batch-preset="all">Select all</button>
           <button class="action-btn" type="button" data-batch-preset="none">Clear all</button>
